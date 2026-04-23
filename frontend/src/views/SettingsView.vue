@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
+import { GetProxyStatus, StartProxy, StopProxy, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
 
 const proxyRunning = ref(false)
 const proxyPort = ref(9680)
@@ -22,10 +22,6 @@ const currentLang = computed({
 onMounted(async () => {
   try { await loadProxyStatus() } catch { /* ignore */ }
   try { autoStartEnabled.value = await GetAutoStart() } catch { /* ignore */ }
-  try {
-    const port = await GetConfig('proxyPort')
-    if (port) proxyPort.value = parseInt(port, 10) || 9680
-  } catch { /* ignore */ }
 })
 
 async function loadProxyStatus() {
