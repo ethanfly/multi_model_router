@@ -39,8 +39,8 @@ func NewApp() *App {
 	return &App{config: config.Default()}
 }
 
-// SetTrayIcon sets the system tray icon PNG data.
-func (a *App) SetTrayIcon(data []byte) {
+// setTrayIcon sets the system tray icon PNG data (internal, not exposed to frontend).
+func (a *App) setTrayIcon(data []byte) {
 	a.trayIconData = data
 }
 

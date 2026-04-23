@@ -15,7 +15,7 @@ var assets embed.FS
 
 func main() {
 	app := NewApp()
-	app.SetTrayIcon(createTrayIcon())
+	app.setTrayIcon(createTrayIcon())
 
 	err := wails.Run(&options.App{
 		Title:  "Multi-Model Router",
