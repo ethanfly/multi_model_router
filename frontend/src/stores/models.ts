@@ -16,7 +16,7 @@ export const useModelsStore = defineStore('models', () => {
   async function fetchModels() {
     loading.value = true
     try {
-      models.value = await GetModels()
+      models.value = (await GetModels()) || []
     } catch (err) {
       console.error('Failed to fetch models:', err)
     } finally {

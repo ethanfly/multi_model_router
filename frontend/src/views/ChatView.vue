@@ -112,19 +112,19 @@ function handleKeydown(e: KeyboardEvent) {
       <div class="mode-selector">
         <label :class="['mode-pill', { active: mode === 'auto' }]">
           <input type="radio" value="auto" v-model="mode" />
-          <span>Auto</span>
+          <span>{{ $t('chat.modeAuto') }}</span>
         </label>
         <label :class="['mode-pill', { active: mode === 'manual' }]">
           <input type="radio" value="manual" v-model="mode" />
-          <span>Manual</span>
+          <span>{{ $t('chat.modeManual') }}</span>
         </label>
         <label :class="['mode-pill', { active: mode === 'race' }]">
           <input type="radio" value="race" v-model="mode" />
-          <span>Race</span>
+          <span>{{ $t('chat.modeRace') }}</span>
         </label>
       </div>
       <select v-if="mode === 'manual'" v-model="selectedModel" class="model-select">
-        <option value="" disabled>Select a model...</option>
+        <option value="" disabled>{{ $t('chat.selectModel') }}</option>
         <option v-for="m in modelsStore.models" :key="m.id" :value="m.id">
           {{ m.name }} ({{ m.provider }})
         </option>
@@ -138,7 +138,7 @@ function handleKeydown(e: KeyboardEvent) {
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
           </svg>
         </div>
-        <p>Send a message to start chatting</p>
+        <p>{{ $t('chat.emptyState') }}</p>
       </div>
       <MessageBubble
         v-for="(msg, i) in messages"
@@ -156,7 +156,7 @@ function handleKeydown(e: KeyboardEvent) {
       <textarea
         v-model="inputText"
         @keydown="handleKeydown"
-        placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
+        :placeholder="$t('chat.placeholder')"
         rows="1"
         :disabled="isStreaming"
       ></textarea>
@@ -240,19 +240,11 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 .model-select {
-  background-color: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
   padding: 6px 12px;
   font-size: 13px;
-  outline: none;
-  transition: border-color 0.2s ease;
+  min-width: 160px;
 }
 
-.model-select:focus {
-  border-color: var(--primary);
-}
 
 /* Messages area with subtle gradient */
 .messages {

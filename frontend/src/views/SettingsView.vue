@@ -1,5 +1,6 @@
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useModelsStore } from '../stores/models'
 import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
 import ModelCard from '../components/ModelCard.vue'
@@ -18,10 +19,19 @@ const proxyLoading = ref(false)
 const copySuccess = ref(false)
 const autoStartEnabled = ref(false)
 
+const { locale, t } = useI18n()
+const currentLang = computed({
+  get: () => locale.value,
+  set: (val: string) => {
+    locale.value = val
+    localStorage.setItem('language', val)
+  },
+})
+
 onMounted(async () => {
-  await modelsStore.fetchModels()
-  await loadProxyStatus()
-  autoStartEnabled.value = await GetAutoStart()
+  try { await modelsStore.fetchModels() } catch { /* ignore */ }
+  try { await loadProxyStatus() } catch { /* ignore */ }
+  try { autoStartEnabled.value = await GetAutoStart() } catch { /* ignore */ }
   try {
     const port = await GetConfig('proxyPort')
     if (port) proxyPort.value = parseInt(port, 10) || 8080
@@ -68,7 +78,7 @@ async function toggleProxy() {
     }
     await loadProxyStatus()
   } catch (err: any) {
-    alert('Proxy error: ' + (err.message || err))
+    alert(t('settings.proxyError') + ': ' + (err.message || err))
   } finally {
     proxyLoading.value = false
   }
@@ -84,9 +94,14 @@ async function copyProxyUrl() {
 }
 
 async function toggleAutoStart() {
-  const result = await SetAutoStartFn(autoStartEnabled.value)
-  if (result !== 'OK') {
-    alert('Failed to set auto-start: ' + result)
+  try {
+    const result = await SetAutoStartFn(autoStartEnabled.value)
+    if (result !== 'OK') {
+      alert(t('settings.autoStartFail') + ': ' + result)
+      autoStartEnabled.value = !autoStartEnabled.value
+    }
+  } catch (err: any) {
+    alert(t('settings.autoStartFail') + ': ' + (err.message || err))
     autoStartEnabled.value = !autoStartEnabled.value
   }
 }
@@ -94,15 +109,25 @@ async function toggleAutoStart() {
 
 <template>
   <div class="settings">
-    <h2 class="page-title">Settings</h2>
+    <h2 class="page-title">{{ $t('settings.title') }}</h2>
 
     <section class="section">
-      <h3 class="section-title">General</h3>
+      <h3 class="section-title">{{ $t('settings.general') }}</h3>
       <div class="general-card">
         <div class="toggle-row">
           <div class="toggle-info">
-            <span class="toggle-label">Auto-start on boot</span>
-            <span class="toggle-desc">Launch Multi-Model Router when Windows starts</span>
+            <span class="toggle-label">{{ $t('settings.language') }}</span>
+            <span class="toggle-desc">{{ $t('settings.languageDesc') }}</span>
+          </div>
+          <select v-model="currentLang" class="lang-select">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
+        </div>
+        <div class="toggle-row" style="margin-top: 16px;">
+          <div class="toggle-info">
+            <span class="toggle-label">{{ $t('settings.autoStart') }}</span>
+            <span class="toggle-desc">{{ $t('settings.autoStartDesc') }}</span>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" v-model="autoStartEnabled" @change="toggleAutoStart" />
@@ -114,19 +139,19 @@ async function toggleAutoStart() {
 
     <section class="section">
       <div class="section-header">
-        <h3 class="section-title">Models</h3>
+        <h3 class="section-title">{{ $t('settings.models') }}</h3>
         <button @click="openAddEditor" class="btn btn-add">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19" />
             <line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          Add Model
+          {{ $t('settings.addModel') }}
         </button>
       </div>
 
-      <div v-if="modelsStore.loading" class="loading">Loading models...</div>
+      <div v-if="modelsStore.loading" class="loading">{{ $t('settings.loadingModels') }}</div>
       <div v-else-if="modelsStore.models.length === 0" class="no-data">
-        No models configured. Click "Add Model" to get started.
+        {{ $t('settings.noModels') }}
       </div>
       <div v-else class="model-grid">
         <ModelCard
@@ -140,11 +165,11 @@ async function toggleAutoStart() {
     </section>
 
     <section class="section">
-      <h3 class="section-title">Proxy Configuration</h3>
+      <h3 class="section-title">{{ $t('settings.proxy') }}</h3>
       <div class="proxy-card">
         <div class="proxy-row">
           <div class="proxy-field">
-            <label>Port</label>
+            <label>{{ $t('settings.port') }}</label>
             <input
               type="number"
               v-model.number="proxyPort"
@@ -158,22 +183,22 @@ async function toggleAutoStart() {
             :disabled="proxyLoading"
             :class="['btn', proxyRunning ? 'btn-stop' : 'btn-start']"
           >
-            {{ proxyLoading ? '...' : proxyRunning ? 'Stop Proxy' : 'Start Proxy' }}
+            {{ proxyLoading ? '...' : proxyRunning ? $t('settings.stopProxy') : $t('settings.startProxy') }}
           </button>
           <div class="proxy-status">
             <span :class="['status-dot', proxyRunning ? 'active' : 'inactive']"></span>
-            {{ proxyRunning ? 'Running' : 'Stopped' }}
+            {{ proxyRunning ? $t('settings.running') : $t('settings.stopped') }}
           </div>
           <button
             v-if="proxyRunning && proxyUrl"
             @click="copyProxyUrl"
             class="btn btn-secondary"
           >
-            {{ copySuccess ? 'Copied!' : 'Copy URL' }}
+            {{ copySuccess ? $t('settings.copied') : $t('settings.copyUrl') }}
           </button>
         </div>
         <div v-if="proxyUrl" class="proxy-url">
-          Proxy URL: <code>{{ proxyUrl }}</code>
+          {{ $t('settings.proxyUrl') }} <code>{{ proxyUrl }}</code>
         </div>
       </div>
     </section>
@@ -247,21 +272,20 @@ async function toggleAutoStart() {
   align-items: center;
   gap: 6px;
   padding: 8px 18px;
-  border: 2px dashed var(--border);
+  border: 1px dashed var(--border);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
 }
 
 .btn-add:hover {
   border-color: var(--primary);
   color: var(--primary);
   background: rgba(59, 130, 246, 0.06);
-  border-style: solid;
 }
 
 /* Glass proxy card */
@@ -357,20 +381,8 @@ async function toggleAutoStart() {
 }
 
 .proxy-field input {
-  background-color: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
   width: 110px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.proxy-field input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  padding: 8px 12px;
 }
 
 .proxy-field input:disabled {
@@ -498,5 +510,11 @@ async function toggleAutoStart() {
 
 .toggle-switch input:checked + .toggle-slider::before {
   transform: translateX(20px);
+}
+
+.lang-select {
+  padding: 6px 12px;
+  font-size: 13px;
+  min-width: 100px;
 }
 </style>

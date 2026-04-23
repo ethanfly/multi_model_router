@@ -10,20 +10,22 @@ import {
 const isMaximized = ref(false)
 
 onMounted(async () => {
-  isMaximized.value = await IsWindowMaximized()
+  try { isMaximized.value = await IsWindowMaximized() } catch { /* ignore */ }
 })
 
 async function handleMinimize() {
-  await MinimizeWindow()
+  try { await MinimizeWindow() } catch { /* ignore */ }
 }
 
 async function handleMaximize() {
-  await ToggleMaximizeWindow()
-  isMaximized.value = await IsWindowMaximized()
+  try {
+    await ToggleMaximizeWindow()
+    isMaximized.value = await IsWindowMaximized()
+  } catch { /* ignore */ }
 }
 
 async function handleClose() {
-  await HideWindow()
+  try { await HideWindow() } catch { /* ignore */ }
 }
 </script>
 
@@ -43,16 +45,16 @@ async function handleClose() {
           <line x1="256" y1="256" x2="148" y2="364" stroke="#8b5cf6" stroke-width="2" opacity="0.5"/>
           <line x1="256" y1="256" x2="364" y2="364" stroke="#f59e0b" stroke-width="2" opacity="0.5"/>
         </svg>
-        <span class="app-title">Multi-Model Router</span>
+        <span class="app-title">{{ $t('app.title') }}</span>
       </div>
     </div>
-    <div class="window-controls">
-      <button class="ctrl-btn minimize" @click="handleMinimize" title="Minimize">
+    <div class="window-controls" @mousedown.stop>
+      <button class="ctrl-btn minimize" @click="handleMinimize" :title="$t('titlebar.minimize')">
         <svg width="10" height="10" viewBox="0 0 10 10">
           <line x1="0" y1="5" x2="10" y2="5" stroke="currentColor" stroke-width="1"/>
         </svg>
       </button>
-      <button class="ctrl-btn maximize" @click="handleMaximize" :title="isMaximized ? 'Restore' : 'Maximize'">
+      <button class="ctrl-btn maximize" @click="handleMaximize" :title="isMaximized ? $t('titlebar.restore') : $t('titlebar.maximize')">
         <svg v-if="!isMaximized" width="10" height="10" viewBox="0 0 10 10">
           <rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1"/>
         </svg>
@@ -61,7 +63,7 @@ async function handleClose() {
           <rect x="0.5" y="2.5" width="7" height="7" fill="var(--bg, #0f172a)" stroke="currentColor" stroke-width="1"/>
         </svg>
       </button>
-      <button class="ctrl-btn close" @click="handleClose" title="Hide to tray">
+      <button class="ctrl-btn close" @click="handleClose" :title="$t('titlebar.hideToTray')">
         <svg width="10" height="10" viewBox="0 0 10 10">
           <line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.2"/>
           <line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.2"/>
@@ -80,12 +82,12 @@ async function handleClose() {
   border-bottom: 1px solid rgba(71, 85, 105, 0.3);
   user-select: none;
   flex-shrink: 0;
+  --wails-draggable: drag;
 }
 
 .drag-region {
   flex: 1;
   height: 100%;
-  -webkit-app-region: drag;
   display: flex;
   align-items: center;
   padding-left: 12px;
@@ -112,7 +114,7 @@ async function handleClose() {
 .window-controls {
   display: flex;
   height: 100%;
-  -webkit-app-region: no-drag;
+  --wails-draggable: no-drag;
 }
 
 .ctrl-btn {

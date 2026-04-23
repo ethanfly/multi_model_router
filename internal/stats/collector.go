@@ -79,9 +79,9 @@ func (c *Collector) GetDailyStats(date time.Time) (*DailyStats, error) {
 
 // ModelUsage holds usage counts and percentages for a model.
 type ModelUsage struct {
-	ModelID    string
-	Count      int64
-	Percentage float64
+	ModelID    string  `json:"modelId"`
+	Count      int64   `json:"count"`
+	Percentage float64 `json:"percentage"`
 }
 
 // GetModelUsage returns per-model usage counts and percentages for the given date.
@@ -172,14 +172,14 @@ func (c *Collector) GetComplexityDistribution(date time.Time) (map[string]int64,
 
 // RecentLog is a trimmed view of a request log for display.
 type RecentLog struct {
-	ID         string
-	ModelID    string
-	Source     string
-	Complexity string
-	TokensIn   int
-	TokensOut  int
-	LatencyMs  int64
-	CreatedAt  time.Time
+	ID         string    `json:"id"`
+	ModelID    string    `json:"modelId"`
+	Source     string    `json:"source"`
+	Complexity string    `json:"complexity"`
+	TokensIn   int       `json:"tokensIn"`
+	TokensOut  int       `json:"tokensOut"`
+	LatencyMs  int64     `json:"latencyMs"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 // GetRecentLogs returns the most recent logs ordered by created_at descending.

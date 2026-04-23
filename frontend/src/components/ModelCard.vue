@@ -1,7 +1,10 @@
 <script lang="ts" setup>
 import { ref, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { TestModel } from '../../wailsjs/go/main/App'
 import type { Model } from '../stores/models'
+
+const { t } = useI18n()
 
 const props = defineProps<{ model: Model }>()
 const emit = defineEmits<{
@@ -23,11 +26,11 @@ function providerGradient(provider: string): string {
 }
 
 const scores = computed(() => [
-  { label: 'Reasoning', value: props.model.reasoning, color: 'linear-gradient(90deg, #3b82f6, #06b6d4)' },
-  { label: 'Coding', value: props.model.coding, color: 'linear-gradient(90deg, #10b981, #34d399)' },
-  { label: 'Creativity', value: props.model.creativity, color: 'linear-gradient(90deg, #f59e0b, #fbbf24)' },
-  { label: 'Speed', value: props.model.speed, color: 'linear-gradient(90deg, #8b5cf6, #a78bfa)' },
-  { label: 'Cost Eff.', value: props.model.costEfficiency, color: 'linear-gradient(90deg, #ec4899, #f472b6)' },
+  { label: t('modelCard.reasoning'), value: props.model.reasoning, color: 'linear-gradient(90deg, #3b82f6, #06b6d4)' },
+  { label: t('modelCard.coding'), value: props.model.coding, color: 'linear-gradient(90deg, #10b981, #34d399)' },
+  { label: t('modelCard.creativity'), value: props.model.creativity, color: 'linear-gradient(90deg, #f59e0b, #fbbf24)' },
+  { label: t('modelCard.speed'), value: props.model.speed, color: 'linear-gradient(90deg, #8b5cf6, #a78bfa)' },
+  { label: t('modelCard.costEff'), value: props.model.costEfficiency, color: 'linear-gradient(90deg, #ec4899, #f472b6)' },
 ])
 
 async function handleTest() {
@@ -55,7 +58,7 @@ async function handleTest() {
       </div>
       <span :class="['status-indicator', model.isActive ? 'active' : 'inactive']">
         <span class="status-dot-inline"></span>
-        {{ model.isActive ? 'Active' : 'Inactive' }}
+        {{ model.isActive ? $t('modelCard.active') : $t('modelCard.inactive') }}
       </span>
     </div>
 
@@ -70,17 +73,17 @@ async function handleTest() {
     </div>
 
     <div class="card-meta">
-      <span>RPM: {{ model.maxRpm || 'Unlimited' }}</span>
+      <span>RPM: {{ model.maxRpm || $t('modelCard.unlimited') }}</span>
     </div>
 
     <div v-if="testResult" :class="['test-result', { 'test-error': testResult.startsWith('Error') }]">{{ testResult }}</div>
 
     <div class="card-actions">
-      <button @click="emit('edit')" class="btn btn-ghost">Edit</button>
+      <button @click="emit('edit')" class="btn btn-ghost">{{ $t('modelCard.edit') }}</button>
       <button @click="handleTest" :disabled="testing" class="btn btn-ghost btn-test">
-        {{ testing ? '...' : 'Test' }}
+        {{ testing ? '...' : $t('modelCard.test') }}
       </button>
-      <button @click="emit('delete')" class="btn btn-ghost btn-delete">Delete</button>
+      <button @click="emit('delete')" class="btn btn-ghost btn-delete">{{ $t('modelCard.delete') }}</button>
     </div>
   </div>
 </template>

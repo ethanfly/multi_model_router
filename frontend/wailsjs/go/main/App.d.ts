@@ -32,6 +32,8 @@ export function SetConfig(arg1:string,arg2:string):Promise<string>;
 
 export function StartProxy(arg1:number):Promise<string>;
 
+export function StartWindowDrag():Promise<void>;
+
 export function StopProxy():Promise<string>;
 
 export function TestModel(arg1:main.ModelJSON):Promise<string>;

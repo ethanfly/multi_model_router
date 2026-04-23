@@ -1,6 +1,9 @@
 <script lang="ts" setup>
 import { ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { Model } from '../stores/models'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   model: Model | null
@@ -35,12 +38,12 @@ const isEditing = ref(!!props.model)
 
 const providers = ['openai', 'anthropic', 'google', 'ollama', 'other']
 
-const scores: { key: keyof Model; label: string }[] = [
-  { key: 'reasoning', label: 'Reasoning' },
-  { key: 'coding', label: 'Coding' },
-  { key: 'creativity', label: 'Creativity' },
-  { key: 'speed', label: 'Speed' },
-  { key: 'costEfficiency', label: 'Cost Efficiency' },
+const scoreKeys: { key: keyof Model; labelKey: string }[] = [
+  { key: 'reasoning', labelKey: 'modelEditor.reasoning' },
+  { key: 'coding', labelKey: 'modelEditor.coding' },
+  { key: 'creativity', labelKey: 'modelEditor.creativity' },
+  { key: 'speed', labelKey: 'modelEditor.speed' },
+  { key: 'costEfficiency', labelKey: 'modelEditor.costEfficiency' },
 ]
 
 function handleSubmit() {
@@ -58,40 +61,40 @@ function handleOverlayClick(e: MouseEvent) {
 <template>
   <div class="modal-overlay" @click="handleOverlayClick">
     <div class="modal">
-      <h3>{{ isEditing ? 'Edit Model' : 'Add Model' }}</h3>
+      <h3>{{ isEditing ? $t('modelEditor.editModel') : $t('modelEditor.addModel') }}</h3>
 
       <form @submit.prevent="handleSubmit" class="editor-form">
         <div class="form-row">
-          <label>Name *</label>
-          <input v-model="form.name" required placeholder="e.g. GPT-4o" />
+          <label>{{ $t('modelEditor.name') }} *</label>
+          <input type="text" v-model="form.name" required placeholder="e.g. GPT-4o" />
         </div>
 
         <div class="form-row">
-          <label>Provider</label>
+          <label>{{ $t('modelEditor.provider') }}</label>
           <select v-model="form.provider">
             <option v-for="p in providers" :key="p" :value="p">{{ p }}</option>
           </select>
         </div>
 
         <div class="form-row">
-          <label>Base URL</label>
-          <input v-model="form.baseUrl" placeholder="https://api.openai.com/v1" />
+          <label>{{ $t('modelEditor.baseUrl') }}</label>
+          <input type="text" v-model="form.baseUrl" placeholder="https://api.openai.com/v1" />
         </div>
 
         <div class="form-row">
-          <label>API Key</label>
-          <input v-model="form.apiKey" type="password" placeholder="sk-..." />
+          <label>{{ $t('modelEditor.apiKey') }}</label>
+          <input v-model="form.apiKey" type="password" autocomplete="off" placeholder="sk-..." />
         </div>
 
         <div class="form-row">
-          <label>Model ID *</label>
-          <input v-model="form.modelId" required placeholder="gpt-4o" />
+          <label>{{ $t('modelEditor.modelId') }} *</label>
+          <input type="text" v-model="form.modelId" required placeholder="gpt-4o" />
         </div>
 
         <div class="scores-section">
-          <label class="section-label">Scores (1-10)</label>
-          <div v-for="s in scores" :key="s.key" class="score-row">
-            <span class="score-label">{{ s.label }}</span>
+          <label class="section-label">{{ $t('modelEditor.scores') }}</label>
+          <div v-for="s in scoreKeys" :key="s.key" class="score-row">
+            <span class="score-label">{{ t(s.labelKey) }}</span>
             <input
               type="range"
               min="1"
@@ -105,25 +108,25 @@ function handleOverlayClick(e: MouseEvent) {
 
         <div class="limits-row">
           <div class="form-row inline">
-            <label>Max RPM</label>
-            <input v-model.number="form.maxRpm" type="number" min="0" placeholder="0 = unlimited" />
+            <label>{{ $t('modelEditor.maxRpm') }}</label>
+            <input v-model.number="form.maxRpm" type="number" min="0" :placeholder="$t('modelEditor.unlimited')" />
           </div>
           <div class="form-row inline">
-            <label>Max TPM</label>
-            <input v-model.number="form.maxTpm" type="number" min="0" placeholder="0 = unlimited" />
+            <label>{{ $t('modelEditor.maxTpm') }}</label>
+            <input v-model.number="form.maxTpm" type="number" min="0" :placeholder="$t('modelEditor.unlimited')" />
           </div>
         </div>
 
         <div class="form-row checkbox-row">
           <label>
             <input type="checkbox" v-model="form.isActive" />
-            Active
+            {{ $t('modelEditor.active') }}
           </label>
         </div>
 
         <div class="form-actions">
-          <button type="button" @click="emit('cancel')" class="btn btn-cancel">Cancel</button>
-          <button type="submit" class="btn btn-save">Save</button>
+          <button type="button" @click="emit('cancel')" class="btn btn-cancel">{{ $t('modelEditor.cancel') }}</button>
+          <button type="submit" class="btn btn-save">{{ $t('modelEditor.save') }}</button>
         </div>
       </form>
     </div>
@@ -201,6 +204,7 @@ function handleOverlayClick(e: MouseEvent) {
 }
 
 .form-row label {
+  margin-bottom: 2px;
   font-size: 12px;
   color: var(--text-muted);
   font-weight: 600;
@@ -208,29 +212,69 @@ function handleOverlayClick(e: MouseEvent) {
   letter-spacing: 0.3px;
 }
 
-/* Dark bg inputs with primary border on focus */
+/* Unified form controls */
 .form-row input[type="text"],
 .form-row input[type="password"],
 .form-row input[type="number"],
 .form-row select {
-  background-color: var(--bg);
+  background-color: var(--surface);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid rgba(71, 85, 105, 0.5);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: 10px 14px;
   font-size: 14px;
+  font-family: inherit;
+  height: 40px;
   outline: none;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.form-row input:hover,
+.form-row select:hover {
+  border-color: var(--border);
 }
 
 .form-row input:focus,
 .form-row select:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
 }
 
 .form-row input::placeholder {
   color: var(--text-muted);
+  opacity: 0.7;
+}
+
+/* Custom select arrow */
+.form-row select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 36px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%2394A3B8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 8px;
+}
+
+.form-row select:focus {
+  background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%233B82F6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* Hide number spinners */
+.form-row input[type="number"]::-webkit-inner-spin-button,
+.form-row input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.form-row input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Hide Edge password reveal */
+.form-row input::-ms-reveal,
+.form-row input::-ms-clear {
+  display: none;
 }
 
 .scores-section {
@@ -330,8 +374,6 @@ function handleOverlayClick(e: MouseEvent) {
 .checkbox-row input[type="checkbox"] {
   width: 18px;
   height: 18px;
-  accent-color: var(--primary);
-  cursor: pointer;
 }
 
 .form-actions {

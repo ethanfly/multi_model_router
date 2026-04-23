@@ -3,15 +3,9 @@ import { ref, onMounted } from 'vue'
 import { GetDashboardStats } from '../../wailsjs/go/main/App'
 
 interface ModelUsage {
-  modelName: string
+  modelId: string
   count: number
   percentage: number
-}
-
-interface ComplexityDistribution {
-  simple: number
-  medium: number
-  complex: number
 }
 
 interface LogEntry {
@@ -25,10 +19,11 @@ interface LogEntry {
 
 interface DashboardStats {
   todayRequests: number
-  todayTokens: number
+  todayTokensIn: number
+  todayTokensOut: number
   avgLatency: number
   modelUsage: ModelUsage[]
-  complexityDistribution: ComplexityDistribution
+  complexityDist: Record<string, number>
   recentLogs: LogEntry[]
 }
 
@@ -44,7 +39,34 @@ async function loadStats() {
   loading.value = true
   error.value = ''
   try {
-    stats.value = await GetDashboardStats() as DashboardStats
+    const raw: any = await GetDashboardStats()
+    if (!raw) {
+      stats.value = null
+      return
+    }
+    // Map Go response: snake_case map keys + json-tagged struct fields
+    const mu: ModelUsage[] = (raw.model_usage || []).map((m: any) => ({
+      modelId: m.modelId || '',
+      count: m.count || 0,
+      percentage: m.percentage || 0,
+    }))
+    const rl: LogEntry[] = (raw.recent_logs || []).map((l: any) => ({
+      time: l.createdAt ? new Date(l.createdAt).toLocaleString() : '',
+      model: l.modelId || '',
+      complexity: l.complexity || '',
+      source: l.source || '',
+      tokens: (l.tokensIn || 0) + (l.tokensOut || 0),
+      latency: l.latencyMs || 0,
+    }))
+    stats.value = {
+      todayRequests: raw.total_requests || 0,
+      todayTokensIn: raw.total_tokens_in || 0,
+      todayTokensOut: raw.total_tokens_out || 0,
+      avgLatency: raw.avg_latency || 0,
+      modelUsage: mu,
+      complexityDist: raw.complexity_dist || {},
+      recentLogs: rl,
+    }
   } catch (err: any) {
     error.value = err.message || 'Failed to load dashboard stats'
   } finally {
@@ -64,9 +86,9 @@ function complexityColor(c: string): string {
 
 <template>
   <div class="dashboard">
-    <h2 class="page-title">Dashboard</h2>
+    <h2 class="page-title">{{ $t('dashboard.title') }}</h2>
 
-    <div v-if="loading" class="loading">Loading...</div>
+    <div v-if="loading" class="loading">{{ $t('dashboard.loading') }}</div>
     <div v-else-if="error" class="error-msg">{{ error }}</div>
 
     <template v-else-if="stats">
@@ -78,7 +100,7 @@ function complexityColor(c: string): string {
             </svg>
           </div>
           <div class="stat-value">{{ stats.todayRequests }}</div>
-          <div class="stat-label">Today's Requests</div>
+          <div class="stat-label">{{ $t('dashboard.todayRequests') }}</div>
         </div>
         <div class="stat-card tokens-card">
           <div class="stat-icon">
@@ -89,8 +111,8 @@ function complexityColor(c: string): string {
               <line x1="16" y1="17" x2="8" y2="17" />
             </svg>
           </div>
-          <div class="stat-value">{{ stats.todayTokens.toLocaleString() }}</div>
-          <div class="stat-label">Today's Tokens</div>
+          <div class="stat-value">{{ (stats.todayTokensIn + stats.todayTokensOut).toLocaleString() }}</div>
+          <div class="stat-label">{{ $t('dashboard.todayTokens') }}</div>
         </div>
         <div class="stat-card latency-card">
           <div class="stat-icon">
@@ -99,30 +121,30 @@ function complexityColor(c: string): string {
               <polyline points="12 6 12 12 16 14" />
             </svg>
           </div>
-          <div class="stat-value">{{ stats.avgLatency.toFixed(0) }}ms</div>
-          <div class="stat-label">Avg Latency</div>
+          <div class="stat-value">{{ stats.avgLatency?.toFixed(0) ?? 0 }}ms</div>
+          <div class="stat-label">{{ $t('dashboard.avgLatency') }}</div>
         </div>
       </div>
 
       <div class="charts-row">
         <div class="chart-section">
-          <h3>Model Usage</h3>
+          <h3>{{ $t('dashboard.modelUsage') }}</h3>
           <div v-if="stats.modelUsage && stats.modelUsage.length" class="bar-chart">
-            <div v-for="mu in stats.modelUsage" :key="mu.modelName" class="bar-row">
-              <span class="bar-label">{{ mu.modelName }}</span>
+            <div v-for="mu in stats.modelUsage" :key="mu.modelId" class="bar-row">
+              <span class="bar-label">{{ mu.modelId }}</span>
               <div class="bar-track">
                 <div class="bar-fill bar-fill-primary" :style="{ width: mu.percentage + '%' }"></div>
               </div>
               <span class="bar-pct">{{ mu.percentage.toFixed(1) }}%</span>
             </div>
           </div>
-          <div v-else class="no-data">No usage data yet</div>
+          <div v-else class="no-data">{{ $t('dashboard.noUsageData') }}</div>
         </div>
 
         <div class="chart-section">
-          <h3>Complexity Distribution</h3>
-          <div v-if="stats.complexityDistribution" class="bar-chart">
-            <div v-for="(val, key) in stats.complexityDistribution" :key="key" class="bar-row">
+          <h3>{{ $t('dashboard.complexityDist') }}</h3>
+          <div v-if="stats.complexityDist" class="bar-chart">
+            <div v-for="(val, key) in stats.complexityDist" :key="key" class="bar-row">
               <span class="bar-label">{{ key }}</span>
               <div class="bar-track">
                 <div
@@ -130,25 +152,25 @@ function complexityColor(c: string): string {
                   :style="{ width: val + '%', background: complexityColor(key as string) }"
                 ></div>
               </div>
-              <span class="bar-pct">{{ val.toFixed(1) }}%</span>
+              <span class="bar-pct">{{ (val as number)?.toFixed(1) ?? '0.0' }}%</span>
             </div>
           </div>
-          <div v-else class="no-data">No data yet</div>
+          <div v-else class="no-data">{{ $t('dashboard.noData') }}</div>
         </div>
       </div>
 
       <div class="logs-section">
-        <h3>Recent Logs</h3>
+        <h3>{{ $t('dashboard.recentLogs') }}</h3>
         <div class="table-wrap">
           <table v-if="stats.recentLogs && stats.recentLogs.length">
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Model</th>
-                <th>Complexity</th>
-                <th>Source</th>
-                <th>Tokens</th>
-                <th>Latency</th>
+                <th>{{ $t('dashboard.colTime') }}</th>
+                <th>{{ $t('dashboard.colModel') }}</th>
+                <th>{{ $t('dashboard.colComplexity') }}</th>
+                <th>{{ $t('dashboard.colSource') }}</th>
+                <th>{{ $t('dashboard.colTokens') }}</th>
+                <th>{{ $t('dashboard.colLatency') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -165,7 +187,7 @@ function complexityColor(c: string): string {
               </tr>
             </tbody>
           </table>
-          <div v-else class="no-data">No logs yet</div>
+          <div v-else class="no-data">{{ $t('dashboard.noLogs') }}</div>
         </div>
       </div>
     </template>

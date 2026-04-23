@@ -62,6 +62,10 @@ export function StartProxy(arg1) {
   return window['go']['main']['App']['StartProxy'](arg1);
 }
 
+export function StartWindowDrag() {
+  return window['go']['main']['App']['StartWindowDrag']();
+}
+
 export function StopProxy() {
   return window['go']['main']['App']['StopProxy']();
 }

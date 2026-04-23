@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sys/windows"
+
 	"multi_model_router/internal/autostart"
 	"multi_model_router/internal/config"
 	"multi_model_router/internal/crypto"
@@ -16,8 +18,8 @@ import (
 	"multi_model_router/internal/proxy"
 	"multi_model_router/internal/router"
 	"multi_model_router/internal/stats"
+	"multi_model_router/internal/wintray"
 
-	"fyne.io/systray"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -60,8 +62,11 @@ func (a *App) startup(ctx context.Context) {
 	a.engine = router.NewEngine(a.classifier)
 	a.loadModels()
 
-	// Start system tray
-	go a.setupSystray()
+	// Start system tray on a dedicated OS thread
+	go wintray.Run("Multi-Model Router", a.trayIconData,
+		func() { wailsRuntime.WindowShow(a.ctx) },
+		func() { a.QuitApp() },
+	)
 
 	// Auto-start proxy if enabled
 	if val, _ := a.db.GetConfig("proxy_enabled"); val == "true" {
@@ -81,7 +86,7 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.db != nil {
 		a.db.Close()
 	}
-	systray.Quit()
+	wintray.Quit()
 }
 
 // onBeforeClose intercepts the window close event.
@@ -93,33 +98,6 @@ func (a *App) onBeforeClose(ctx context.Context) bool {
 	}
 	wailsRuntime.WindowHide(a.ctx)
 	return true
-}
-
-// setupSystray initializes the system tray icon and menu.
-func (a *App) setupSystray() {
-	systray.Run(func() {
-		if len(a.trayIconData) > 0 {
-			systray.SetIcon(a.trayIconData)
-		}
-		systray.SetTooltip("Multi-Model Router")
-
-		mShow := systray.AddMenuItem("Show", "Show window")
-		systray.AddSeparator()
-		mQuit := systray.AddMenuItem("Quit", "Quit application")
-
-		go func() {
-			for {
-				select {
-				case <-mShow.ClickedCh:
-					wailsRuntime.WindowShow(a.ctx)
-				case <-mQuit.ClickedCh:
-					a.QuitApp()
-				}
-			}
-		}()
-	}, func() {
-		// onExit - cleanup
-	})
 }
 
 // --- Window control methods ---
@@ -159,7 +137,7 @@ func (a *App) QuitApp() {
 	if a.db != nil {
 		a.db.Close()
 	}
-	systray.Quit()
+	wintray.Quit()
 	os.Exit(0)
 }
 
@@ -251,6 +229,28 @@ func (a *App) ensureProvider(providerName, baseURL, apiKey string) {
 	}
 }
 
+// --- Window drag via Windows API ---
+
+var (
+	dragUser32          = windows.NewLazyDLL("user32.dll")
+	procGetForegroundWindow = dragUser32.NewProc("GetForegroundWindow")
+	procReleaseCapture      = dragUser32.NewProc("ReleaseCapture")
+	procPostMessageW        = dragUser32.NewProc("PostMessageW")
+)
+
+const (
+	WM_NCLBUTTONDOWN = 0x00A1
+	HTCAPTION        = 0x0002
+)
+
+// StartWindowDrag initiates a native window move via Windows API.
+// Called from frontend mousedown on the title bar.
+func (a *App) StartWindowDrag() {
+	procReleaseCapture.Call()
+	hwnd, _, _ := procGetForegroundWindow.Call()
+	procPostMessageW.Call(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+}
+
 // --- Frontend-bound types ---
 
 // ModelJSON is the frontend-safe representation of a model (no API key).
@@ -300,7 +300,7 @@ type ChatResponse struct {
 // GetModels returns all models from the database for the frontend.
 func (a *App) GetModels() []ModelJSON {
 	if a.db == nil {
-		return nil
+		return []ModelJSON{}
 	}
 
 	rows, err := a.db.Query(
