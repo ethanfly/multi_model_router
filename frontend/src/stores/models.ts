@@ -5,23 +5,9 @@ import {
   SaveModel,
   DeleteModel,
 } from '../../wailsjs/go/main/App'
+import { main } from '../../wailsjs/go/models'
 
-export interface Model {
-  id: string
-  name: string
-  provider: string
-  baseUrl: string
-  apiKey: string
-  modelId: string
-  reasoning: number
-  coding: number
-  creativity: number
-  speed: number
-  costEfficiency: number
-  maxRpm: number
-  maxTpm: number
-  isActive: boolean
-}
+type Model = main.ModelJSON
 
 export const useModelsStore = defineStore('models', () => {
   const models = ref<Model[]>([])
@@ -30,7 +16,7 @@ export const useModelsStore = defineStore('models', () => {
   async function fetchModels() {
     loading.value = true
     try {
-      models.value = await GetModels() as Model[]
+      models.value = await GetModels()
     } catch (err) {
       console.error('Failed to fetch models:', err)
     } finally {
@@ -60,3 +46,5 @@ export const useModelsStore = defineStore('models', () => {
 
   return { models, loading, fetchModels, save, remove }
 })
+
+export type { Model }

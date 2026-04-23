@@ -2,6 +2,7 @@
 import { ref, nextTick, onMounted, onUnmounted } from 'vue'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import { SendChat } from '../../wailsjs/go/main/App'
+import { main } from '../../wailsjs/go/models'
 import { useModelsStore } from '../stores/models'
 import MessageBubble from '../components/MessageBubble.vue'
 
@@ -70,13 +71,13 @@ async function sendMessage() {
   scrollToBottom()
 
   try {
-    await SendChat({
+    await SendChat(main.ChatRequest.createFrom({
       messages: messages.value
         .filter((m) => m.role === 'user' || (m.role === 'assistant' && m.content))
         .map((m) => ({ role: m.role, content: m.content })),
       mode: mode.value,
       modelId: mode.value === 'manual' ? selectedModel.value : '',
-    })
+    }))
   } catch (err: any) {
     messages.value.push({
       role: 'error',

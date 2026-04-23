@@ -145,17 +145,17 @@ type ModelJSON struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	Provider       string `json:"provider"`
-	BaseURL        string `json:"base_url"`
-	APIKey         string `json:"api_key"`
-	ModelID        string `json:"model_id"`
+	BaseURL        string `json:"baseUrl"`
+	APIKey         string `json:"apiKey"`
+	ModelID        string `json:"modelId"`
 	Reasoning      int    `json:"reasoning"`
 	Coding         int    `json:"coding"`
 	Creativity     int    `json:"creativity"`
 	Speed          int    `json:"speed"`
-	CostEfficiency int    `json:"cost_efficiency"`
-	MaxRPM         int    `json:"max_rpm"`
-	MaxTPM         int    `json:"max_tpm"`
-	IsActive       bool   `json:"is_active"`
+	CostEfficiency int    `json:"costEfficiency"`
+	MaxRPM         int    `json:"maxRpm"`
+	MaxTPM         int    `json:"maxTpm"`
+	IsActive       bool   `json:"isActive"`
 }
 
 // ChatMessage represents a single message in a chat request from the frontend.
@@ -168,16 +168,16 @@ type ChatMessage struct {
 type ChatRequest struct {
 	Messages []ChatMessage `json:"messages"`
 	Mode     string        `json:"mode"`
-	ModelID  string        `json:"model_id"`
+	ModelID  string        `json:"modelId"`
 }
 
 // ChatResponse is sent back to the frontend after routing a chat.
 type ChatResponse struct {
-	ModelID    string `json:"model_id"`
-	ModelName  string `json:"model_name"`
+	ModelID    string `json:"modelId"`
+	ModelName  string `json:"modelName"`
 	Provider   string `json:"provider"`
 	Complexity string `json:"complexity"`
-	RouteMode  string `json:"route_mode"`
+	RouteMode  string `json:"routeMode"`
 	Status     string `json:"status"`
 	Error      string `json:"error"`
 }
