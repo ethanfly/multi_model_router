@@ -4,6 +4,7 @@ import (
 	"embed"
 
 	"github.com/wailsapp/wails/v2"
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
@@ -31,6 +32,12 @@ func main() {
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
 			DisableWindowIcon:    false,
+		},
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "com.ethanfly.multimodelrouter",
+			OnSecondInstanceLaunch: func(si options.SecondInstanceData) {
+				wailsRuntime.WindowShow(app.ctx)
+			},
 		},
 		Bind: []interface{}{
 			app,

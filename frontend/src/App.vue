@@ -60,6 +60,7 @@ import TitleBar from './components/TitleBar.vue'
 .body {
   display: flex;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 
@@ -73,6 +74,7 @@ import TitleBar from './components/TitleBar.vue'
   padding-top: 16px;
   gap: 4px;
   border-right: 1px solid rgba(71, 85, 105, 0.3);
+  z-index: 10;
 }
 
 .nav-logo {
@@ -146,8 +148,10 @@ import TitleBar from './components/TitleBar.vue'
 
 .main-content {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background-color: var(--surface);
-  border-top-left-radius: var(--radius);
 }
 </style>
