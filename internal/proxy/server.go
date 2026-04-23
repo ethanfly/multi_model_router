@@ -319,14 +319,16 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	body, err := provider.ReadBody(r.Body, 1<<20)
+	// Read raw body (10MB limit for tool-heavy requests)
+	body, err := provider.ReadBody(r.Body, 10<<20)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
 		return
 	}
 
-	var req proxyRequest
-	if err := json.Unmarshal(body, &req); err != nil {
+	// Parse into raw map to preserve ALL fields (tools, tool_choice, thinking, etc.)
+	var reqMap map[string]json.RawMessage
+	if err := json.Unmarshal(body, &reqMap); err != nil {
 		if isAnthropic {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 				"type":  "error",
@@ -338,51 +340,61 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build provider.Message slice
-	msgs := make([]provider.Message, 0, len(req.Messages)+1)
-
-	// For Anthropic requests, convert top-level system field to a system message
-	if isAnthropic && len(req.System) > 0 {
-		systemText := extractSystemText(req.System)
-		if systemText != "" {
-			msgs = append(msgs, provider.Message{Role: "system", Content: systemText})
-		}
+	// Extract fields needed for routing only
+	var modelField string
+	if raw, ok := reqMap["model"]; ok {
+		json.Unmarshal(raw, &modelField)
 	}
 
-	for _, m := range req.Messages {
-		msgs = append(msgs, provider.Message{Role: m.Role, Content: m.Content})
+	var msgs []proxyMessage
+	if raw, ok := reqMap["messages"]; ok {
+		json.Unmarshal(raw, &msgs)
 	}
 
-	// Determine route mode based on model field
+	var systemText string
+	if raw, ok := reqMap["system"]; ok {
+		systemText = extractSystemText(raw)
+	}
+
+	// Build messages for classification
+	providerMsgs := make([]provider.Message, 0, len(msgs)+1)
+	if isAnthropic && systemText != "" {
+		providerMsgs = append(providerMsgs, provider.Message{Role: "system", Content: systemText})
+	}
+	for _, m := range msgs {
+		providerMsgs = append(providerMsgs, provider.Message{Role: m.Role, Content: m.Content})
+	}
+
+	// Determine route mode
 	mode := s.defaultMode
-	modelID := ""
 	switch {
-	case req.Model == "" || req.Model == "auto":
-	case req.Model == "race":
+	case modelField == "" || modelField == "auto":
+	case modelField == "race":
 		mode = router.RouteRace
 	default:
 		mode = router.RouteManual
-		modelID = req.Model
 	}
-
 	if h := r.Header.Get("X-Router-Mode"); h != "" {
 		mode = router.RouteModeFromString(h)
 	}
 
-	routeReq := &router.RouteRequest{
-		Messages:    msgs,
-		Mode:        mode,
-		ModelID:     modelID,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
+	// Select model via router (raw passthrough — no intermediate serialization)
+	type modelSelector interface {
+		SelectModel(ctx context.Context, req *router.RouteRequest) (*router.ModelConfig, int64, string)
 	}
 
-	result := s.router.Route(r.Context(), routeReq)
-	if result == nil || result.Status != "success" {
-		errMsg := "routing failed"
-		if result != nil && result.ErrorMsg != "" {
-			errMsg = result.ErrorMsg
-		}
+	selector, ok := s.router.(modelSelector)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "router does not support model selection"})
+		return
+	}
+
+	modelCfg, complexity, errMsg := selector.SelectModel(r.Context(), &router.RouteRequest{
+		Messages: providerMsgs,
+		Mode:     mode,
+		ModelID:  modelField,
+	})
+	if modelCfg == nil {
 		if isAnthropic {
 			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
 				"type":  "error",
@@ -394,37 +406,107 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("X-Router-Model", result.ModelName)
-	w.Header().Set("X-Router-Complexity", fmt.Sprintf("%d", result.Complexity))
+	w.Header().Set("X-Router-Model", modelCfg.Name)
+	w.Header().Set("X-Router-Complexity", fmt.Sprintf("%d", complexity))
 
+	// Replace model in raw body with upstream model ID, preserving all other fields
+	reqMap["model"], _ = json.Marshal(modelCfg.ModelID)
+	upstreamBody, _ := json.Marshal(reqMap)
+
+	// Build upstream URL based on provider type
+	var upstreamPath string
+	if modelCfg.Provider == "anthropic" {
+		upstreamPath = "/messages"
+	} else {
+		upstreamPath = "/chat/completions"
+	}
+	targetURL := strings.TrimSuffix(modelCfg.BaseURL, "/") + upstreamPath
+
+	// Create upstream request
+	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(upstreamBody))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create upstream request"})
+		return
+	}
+
+	// Copy all client headers (preserves anthropic-beta, content-type, etc.)
+	for k, vv := range r.Header {
+		proxyReq.Header[k] = vv
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+
+	// Set auth based on provider type
+	switch modelCfg.Provider {
+	case "anthropic":
+		proxyReq.Header.Set("x-api-key", modelCfg.APIKey)
+		if proxyReq.Header.Get("anthropic-version") == "" {
+			proxyReq.Header.Set("anthropic-version", "2023-06-01")
+		}
+		proxyReq.Header.Del("Authorization")
+	default:
+		proxyReq.Header.Set("Authorization", "Bearer "+modelCfg.APIKey)
+		proxyReq.Header.Del("x-api-key")
+	}
+
+	// Forward to upstream
 	start := time.Now()
 	var rs requestStats
 
-	if isAnthropic {
-		if req.Stream {
-			s.writeAnthropicStream(w, result, &rs)
-		} else {
-			s.writeAnthropicNonStream(w, result, &rs)
+	resp, err := s.httpClient.Do(proxyReq)
+	if err != nil {
+		log.Printf("upstream error for %s: %v", modelCfg.Name, err)
+		rs.status = "error"
+		rs.errMsg = err.Error()
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("upstream request failed: %v", err)})
+		s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers from upstream
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
 		}
-	} else {
-		if req.Stream {
-			s.writeOpenAIStream(w, result, &rs)
-		} else {
-			s.writeOpenAINonStream(w, result, &rs)
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream response body back to client
+	flusher, canFlush := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			break
 		}
 	}
 
-	// Log request stats
+	// Stats
+	if resp.StatusCode >= 400 {
+		rs.status = "error"
+	} else {
+		rs.status = "success"
+	}
+	s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+}
+
+func (s *Server) logRequest(modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, rs *requestStats, latencyMs int64) {
 	if s.OnRequestLog != nil && rs.status != "" {
 		s.OnRequestLog(&RequestLogEntry{
-			ModelName:  result.ModelName,
+			ModelName:  modelCfg.Name,
 			Source:     "proxy",
-			Complexity: result.Complexity,
+			Complexity: complexity,
 			RouteMode:  mode.String(),
 			Status:     rs.status,
 			TokensIn:   rs.tokensIn,
 			TokensOut:  rs.tokensOut,
-			LatencyMs:  time.Since(start).Milliseconds(),
+			LatencyMs:  latencyMs,
 			ErrorMsg:   rs.errMsg,
 		})
 	}

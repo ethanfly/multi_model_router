@@ -166,6 +166,30 @@ func (e *Engine) Route(ctx context.Context, req *RouteRequest) *RouteResult {
 	}
 }
 
+// SelectModel performs routing and returns the selected ModelConfig without sending the request.
+// This enables raw passthrough proxying where the caller forwards the original request body directly.
+func (e *Engine) SelectModel(ctx context.Context, req *RouteRequest) (*ModelConfig, int64, string) {
+	switch req.Mode {
+	case RouteManual:
+		model := e.findModel(req.ModelID)
+		if model == nil {
+			return nil, 0, fmt.Sprintf("model %s not found", req.ModelID)
+		}
+		return model, 0, ""
+	default: // RouteAuto and RouteRace both select the best model
+		question := messagesToString(req.Messages)
+		classResult, err := e.classifier.Classify(ctx, question)
+		if err != nil {
+			return nil, 0, fmt.Sprintf("classification failed: %v", err)
+		}
+		model := e.selectModel(classResult.Complexity)
+		if model == nil {
+			return nil, int64(classResult.Complexity), "no available model"
+		}
+		return model, int64(classResult.Complexity), ""
+	}
+}
+
 // routeAuto classifies the question, selects the best model, and sends the request.
 func (e *Engine) routeAuto(ctx context.Context, req *RouteRequest) *RouteResult {
 	question := messagesToString(req.Messages)
