@@ -12,11 +12,9 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-//go:embed build/appicon.png
-var trayIconData []byte
-
 func main() {
 	app := NewApp()
+	app.SetTrayIcon(createTrayIcon())
 
 	err := wails.Run(&options.App{
 		Title:  "Multi-Model Router",

@@ -23,19 +23,25 @@ import (
 
 // App is the main Wails binding struct.
 type App struct {
-	ctx         context.Context
-	config      *config.Config
-	db          *db.DB
-	engine      *router.Engine
-	classifier  *router.Classifier
-	collector   *stats.Collector
-	proxy       *proxy.Server
-	isQuitting  atomic.Bool
+	ctx          context.Context
+	config       *config.Config
+	db           *db.DB
+	engine       *router.Engine
+	classifier   *router.Classifier
+	collector    *stats.Collector
+	proxy        *proxy.Server
+	isQuitting   atomic.Bool
+	trayIconData []byte
 }
 
 // NewApp creates a new App instance with default config.
 func NewApp() *App {
 	return &App{config: config.Default()}
+}
+
+// SetTrayIcon sets the system tray icon PNG data.
+func (a *App) SetTrayIcon(data []byte) {
+	a.trayIconData = data
 }
 
 // startup is called when the Wails app starts.
@@ -92,7 +98,9 @@ func (a *App) onBeforeClose(ctx context.Context) bool {
 // setupSystray initializes the system tray icon and menu.
 func (a *App) setupSystray() {
 	systray.Run(func() {
-		systray.SetIcon(trayIconData)
+		if len(a.trayIconData) > 0 {
+			systray.SetIcon(a.trayIconData)
+		}
 		systray.SetTooltip("Multi-Model Router")
 
 		mShow := systray.AddMenuItem("Show", "Show window")
