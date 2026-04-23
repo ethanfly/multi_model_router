@@ -54,10 +54,10 @@ async function loadStats() {
 
 function complexityColor(c: string): string {
   switch (c) {
-    case 'simple': return '#22c55e'
-    case 'medium': return '#eab308'
-    case 'complex': return '#ef4444'
-    default: return '#6b7280'
+    case 'simple': return 'var(--success)'
+    case 'medium': return 'var(--warning)'
+    case 'complex': return 'var(--error)'
+    default: return 'var(--text-muted)'
   }
 }
 </script>
@@ -71,15 +71,34 @@ function complexityColor(c: string): string {
 
     <template v-else-if="stats">
       <div class="stat-cards">
-        <div class="stat-card">
+        <div class="stat-card requests-card">
+          <div class="stat-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+            </svg>
+          </div>
           <div class="stat-value">{{ stats.todayRequests }}</div>
           <div class="stat-label">Today's Requests</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card tokens-card">
+          <div class="stat-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+            </svg>
+          </div>
           <div class="stat-value">{{ stats.todayTokens.toLocaleString() }}</div>
           <div class="stat-label">Today's Tokens</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card latency-card">
+          <div class="stat-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+          </div>
           <div class="stat-value">{{ stats.avgLatency.toFixed(0) }}ms</div>
           <div class="stat-label">Avg Latency</div>
         </div>
@@ -92,7 +111,7 @@ function complexityColor(c: string): string {
             <div v-for="mu in stats.modelUsage" :key="mu.modelName" class="bar-row">
               <span class="bar-label">{{ mu.modelName }}</span>
               <div class="bar-track">
-                <div class="bar-fill" :style="{ width: mu.percentage + '%' }"></div>
+                <div class="bar-fill bar-fill-primary" :style="{ width: mu.percentage + '%' }"></div>
               </div>
               <span class="bar-pct">{{ mu.percentage.toFixed(1) }}%</span>
             </div>
@@ -108,7 +127,7 @@ function complexityColor(c: string): string {
               <div class="bar-track">
                 <div
                   class="bar-fill"
-                  :style="{ width: val + '%', backgroundColor: complexityColor(key as string) }"
+                  :style="{ width: val + '%', background: complexityColor(key as string) }"
                 ></div>
               </div>
               <span class="bar-pct">{{ val.toFixed(1) }}%</span>
@@ -155,28 +174,33 @@ function complexityColor(c: string): string {
 
 <style scoped>
 .dashboard {
-  padding: 24px;
-  color: #e5e7eb;
+  padding: 28px;
+  color: var(--text);
   max-width: 960px;
   margin: 0 auto;
 }
 
 .page-title {
-  margin: 0 0 20px 0;
-  font-size: 22px;
-  font-weight: 600;
+  margin: 0 0 24px 0;
+  font-size: 24px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--text), var(--text-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .loading, .error-msg, .no-data {
-  color: #9ca3af;
+  color: var(--text-muted);
   padding: 16px;
   text-align: center;
 }
 
 .error-msg {
-  color: #ef4444;
+  color: var(--error);
 }
 
+/* Gradient stat cards */
 .stat-cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -185,25 +209,94 @@ function complexityColor(c: string): string {
 }
 
 .stat-card {
-  background-color: #1f2937;
-  border-radius: 10px;
-  padding: 20px;
+  position: relative;
+  border-radius: var(--radius);
+  padding: 24px 20px;
   text-align: center;
-  border: 1px solid #374151;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.12;
+  border-radius: var(--radius);
+}
+
+.requests-card {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(59, 130, 246, 0.05));
+  border-color: rgba(59, 130, 246, 0.2);
+}
+
+.requests-card::before {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+}
+
+.requests-card .stat-icon {
+  color: var(--primary);
+}
+
+.requests-card .stat-value {
+  color: var(--primary);
+}
+
+.tokens-card {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.15), rgba(6, 182, 212, 0.05));
+  border-color: rgba(6, 182, 212, 0.2);
+}
+
+.tokens-card::before {
+  background: linear-gradient(135deg, var(--accent), var(--success));
+}
+
+.tokens-card .stat-icon {
+  color: var(--accent);
+}
+
+.tokens-card .stat-value {
+  color: var(--accent);
+}
+
+.latency-card {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(139, 92, 246, 0.05));
+  border-color: rgba(139, 92, 246, 0.2);
+}
+
+.latency-card::before {
+  background: linear-gradient(135deg, var(--secondary), var(--primary));
+}
+
+.latency-card .stat-icon {
+  color: var(--secondary);
+}
+
+.latency-card .stat-value {
+  color: var(--secondary);
+}
+
+.stat-icon {
+  margin-bottom: 8px;
+  opacity: 0.8;
 }
 
 .stat-value {
-  font-size: 28px;
-  font-weight: 700;
-  color: #3b82f6;
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.1;
 }
 
 .stat-label {
   font-size: 13px;
-  color: #9ca3af;
-  margin-top: 4px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  font-weight: 500;
 }
 
+/* Charts */
 .charts-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -212,28 +305,29 @@ function complexityColor(c: string): string {
 }
 
 .chart-section {
-  background-color: #1f2937;
-  border-radius: 10px;
-  padding: 16px;
-  border: 1px solid #374151;
+  background-color: var(--bg);
+  border-radius: var(--radius);
+  padding: 20px;
+  border: 1px solid var(--border);
 }
 
 .chart-section h3 {
-  margin: 0 0 12px 0;
+  margin: 0 0 16px 0;
   font-size: 15px;
   font-weight: 600;
+  color: var(--text-secondary);
 }
 
 .bar-chart {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .bar-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .bar-label {
@@ -244,21 +338,39 @@ function complexityColor(c: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-secondary);
 }
 
 .bar-track {
   flex: 1;
-  height: 16px;
-  background-color: #374151;
-  border-radius: 4px;
+  height: 14px;
+  background-color: var(--surface-light);
+  border-radius: 7px;
   overflow: hidden;
 }
 
 .bar-fill {
   height: 100%;
-  background-color: #3b82f6;
-  border-radius: 4px;
-  transition: width 0.3s;
+  border-radius: 7px;
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.bar-fill-primary {
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+}
+
+.bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+  animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 .bar-pct {
@@ -266,44 +378,74 @@ function complexityColor(c: string): string {
   font-size: 12px;
   text-align: left;
   flex-shrink: 0;
+  color: var(--text-secondary);
+  font-weight: 500;
 }
 
+/* Logs table */
 .logs-section {
-  background-color: #1f2937;
-  border-radius: 10px;
-  padding: 16px;
-  border: 1px solid #374151;
+  background-color: var(--bg);
+  border-radius: var(--radius);
+  padding: 20px;
+  border: 1px solid var(--border);
 }
 
 .logs-section h3 {
-  margin: 0 0 12px 0;
+  margin: 0 0 16px 0;
   font-size: 15px;
   font-weight: 600;
+  color: var(--text-secondary);
 }
 
 .table-wrap {
   overflow-x: auto;
+  border-radius: var(--radius-sm);
 }
 
 table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13px;
 }
 
 th, td {
-  padding: 8px 12px;
+  padding: 10px 14px;
   text-align: left;
-  border-bottom: 1px solid #374151;
+}
+
+thead tr {
+  background: var(--surface);
 }
 
 th {
-  color: #9ca3af;
+  color: var(--text-muted);
   font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+}
+
+th:first-child {
+  border-radius: var(--radius-sm) 0 0 0;
+}
+
+th:last-child {
+  border-radius: 0 var(--radius-sm) 0 0;
+}
+
+tbody tr {
+  transition: background-color 0.15s ease;
+}
+
+tbody tr:hover {
+  background-color: rgba(51, 65, 85, 0.3);
 }
 
 td {
-  color: #d1d5db;
+  color: var(--text-secondary);
+  border-bottom: 1px solid rgba(71, 85, 105, 0.3);
 }
 
 .complexity-dot {
@@ -311,7 +453,17 @@ td {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-right: 4px;
+  margin-right: 6px;
   vertical-align: middle;
+  box-shadow: 0 0 6px currentColor;
+}
+
+@media (max-width: 700px) {
+  .stat-cards {
+    grid-template-columns: 1fr;
+  }
+  .charts-row {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

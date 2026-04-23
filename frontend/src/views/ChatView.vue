@@ -110,15 +110,15 @@ function handleKeydown(e: KeyboardEvent) {
   <div class="chat-view">
     <div class="top-bar">
       <div class="mode-selector">
-        <label class="mode-option">
+        <label :class="['mode-pill', { active: mode === 'auto' }]">
           <input type="radio" value="auto" v-model="mode" />
           <span>Auto</span>
         </label>
-        <label class="mode-option">
+        <label :class="['mode-pill', { active: mode === 'manual' }]">
           <input type="radio" value="manual" v-model="mode" />
           <span>Manual</span>
         </label>
-        <label class="mode-option">
+        <label :class="['mode-pill', { active: mode === 'race' }]">
           <input type="radio" value="race" v-model="mode" />
           <span>Race</span>
         </label>
@@ -133,6 +133,11 @@ function handleKeydown(e: KeyboardEvent) {
 
     <div class="messages" ref="messagesContainer">
       <div v-if="messages.length === 0" class="empty-state">
+        <div class="empty-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+        </div>
         <p>Send a message to start chatting</p>
       </div>
       <MessageBubble
@@ -140,6 +145,11 @@ function handleKeydown(e: KeyboardEvent) {
         :key="i"
         :message="msg"
       />
+      <div v-if="isStreaming" class="streaming-indicator">
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
+      </div>
     </div>
 
     <div class="input-bar">
@@ -151,7 +161,15 @@ function handleKeydown(e: KeyboardEvent) {
         :disabled="isStreaming"
       ></textarea>
       <button @click="sendMessage" :disabled="isStreaming || !inputText.trim()" class="send-btn">
-        {{ isStreaming ? '...' : 'Send' }}
+        <svg v-if="!isStreaming" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13" />
+          <polygon points="22 2 15 22 11 13 2 9 22 2" />
+        </svg>
+        <span v-else class="btn-dots">
+          <span class="dot"></span>
+          <span class="dot"></span>
+          <span class="dot"></span>
+        </span>
       </button>
     </div>
   </div>
@@ -162,116 +180,236 @@ function handleKeydown(e: KeyboardEvent) {
   display: flex;
   flex-direction: column;
   height: 100%;
-  color: #e5e7eb;
+  color: var(--text);
 }
 
+/* Glass top bar */
 .top-bar {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 10px 16px;
-  background-color: #1f2937;
-  border-bottom: 1px solid #374151;
+  padding: 12px 20px;
+  background: rgba(30, 41, 59, 0.7);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(71, 85, 105, 0.4);
+  border-radius: var(--radius) var(--radius) 0 0;
 }
 
+/* Segmented control pills */
 .mode-selector {
   display: flex;
-  gap: 8px;
+  background: var(--bg);
+  border-radius: 20px;
+  padding: 3px;
+  border: 1px solid var(--border);
 }
 
-.mode-option {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+.mode-pill {
+  position: relative;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 17px;
+  transition: all 0.2s ease;
 }
 
-.mode-option input {
-  accent-color: #3b82f6;
+.mode-pill input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.mode-pill span {
+  display: block;
+  padding: 6px 16px;
+  border-radius: 17px;
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.mode-pill:hover span {
+  color: var(--text-secondary);
+}
+
+.mode-pill.active span {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
 }
 
 .model-select {
-  background-color: #374151;
-  color: #e5e7eb;
-  border: 1px solid #4b5563;
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 14px;
+  background-color: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 13px;
   outline: none;
+  transition: border-color 0.2s ease;
 }
 
 .model-select:focus {
-  border-color: #3b82f6;
+  border-color: var(--primary);
 }
 
+/* Messages area with subtle gradient */
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.3) 0%, rgba(30, 41, 59, 0.1) 100%);
 }
 
 .empty-state {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #6b7280;
-  font-size: 16px;
+  color: var(--text-muted);
+  gap: 12px;
 }
 
+.empty-icon {
+  opacity: 0.4;
+}
+
+.empty-state p {
+  font-size: 15px;
+}
+
+/* Streaming indicator */
+.streaming-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 14px;
+  align-self: flex-start;
+}
+
+.streaming-indicator .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.streaming-indicator .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.streaming-indicator .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes pulse-dot {
+  0%, 80%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+/* Elevated input bar */
 .input-bar {
   display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  background-color: #1f2937;
-  border-top: 1px solid #374151;
+  gap: 10px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border-top: 1px solid rgba(71, 85, 105, 0.3);
 }
 
 .input-bar textarea {
   flex: 1;
-  background-color: #374151;
-  color: #e5e7eb;
-  border: 1px solid #4b5563;
-  border-radius: 8px;
-  padding: 8px 12px;
+  background-color: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
   font-size: 14px;
   resize: none;
   outline: none;
   font-family: inherit;
-  min-height: 38px;
+  min-height: 44px;
   max-height: 120px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  line-height: 1.5;
 }
 
 .input-bar textarea:focus {
-  border-color: #3b82f6;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
 }
 
 .input-bar textarea:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
+.input-bar textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* Gradient send button */
 .send-btn {
-  background-color: #3b82f6;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
   color: white;
   border: none;
-  border-radius: 8px;
-  padding: 8px 20px;
+  border-radius: var(--radius);
+  padding: 0 20px;
   font-size: 14px;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition: all 0.2s ease;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  box-shadow: 0 2px 12px rgba(59, 130, 246, 0.25);
 }
 
 .send-btn:hover:not(:disabled) {
-  background-color: #2563eb;
+  box-shadow: 0 4px 20px rgba(59, 130, 246, 0.4);
+  transform: translateY(-1px);
+}
+
+.send-btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .send-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
+  transform: none;
+}
+
+.send-btn .btn-dots {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.send-btn .btn-dots .dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: white;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+.send-btn .btn-dots .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.send-btn .btn-dots .dot:nth-child(3) {
+  animation-delay: 0.4s;
 }
 </style>

@@ -88,8 +88,14 @@ async function copyProxyUrl() {
 
     <section class="section">
       <div class="section-header">
-        <h3>Models</h3>
-        <button @click="openAddEditor" class="btn btn-primary">+ Add Model</button>
+        <h3 class="section-title">Models</h3>
+        <button @click="openAddEditor" class="btn btn-add">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Add Model
+        </button>
       </div>
 
       <div v-if="modelsStore.loading" class="loading">Loading models...</div>
@@ -108,39 +114,41 @@ async function copyProxyUrl() {
     </section>
 
     <section class="section">
-      <h3>Proxy Configuration</h3>
-      <div class="proxy-row">
-        <div class="proxy-field">
-          <label>Port</label>
-          <input
-            type="number"
-            v-model.number="proxyPort"
-            :disabled="proxyRunning"
-            min="1"
-            max="65535"
-          />
+      <h3 class="section-title">Proxy Configuration</h3>
+      <div class="proxy-card">
+        <div class="proxy-row">
+          <div class="proxy-field">
+            <label>Port</label>
+            <input
+              type="number"
+              v-model.number="proxyPort"
+              :disabled="proxyRunning"
+              min="1"
+              max="65535"
+            />
+          </div>
+          <button
+            @click="toggleProxy"
+            :disabled="proxyLoading"
+            :class="['btn', proxyRunning ? 'btn-stop' : 'btn-start']"
+          >
+            {{ proxyLoading ? '...' : proxyRunning ? 'Stop Proxy' : 'Start Proxy' }}
+          </button>
+          <div class="proxy-status">
+            <span :class="['status-dot', proxyRunning ? 'active' : 'inactive']"></span>
+            {{ proxyRunning ? 'Running' : 'Stopped' }}
+          </div>
+          <button
+            v-if="proxyRunning && proxyUrl"
+            @click="copyProxyUrl"
+            class="btn btn-secondary"
+          >
+            {{ copySuccess ? 'Copied!' : 'Copy URL' }}
+          </button>
         </div>
-        <button
-          @click="toggleProxy"
-          :disabled="proxyLoading"
-          :class="['btn', proxyRunning ? 'btn-danger' : 'btn-success']"
-        >
-          {{ proxyLoading ? '...' : proxyRunning ? 'Stop Proxy' : 'Start Proxy' }}
-        </button>
-        <div class="proxy-status">
-          <span :class="['status-dot', proxyRunning ? 'active' : 'inactive']"></span>
-          {{ proxyRunning ? 'Running' : 'Stopped' }}
+        <div v-if="proxyUrl" class="proxy-url">
+          Proxy URL: <code>{{ proxyUrl }}</code>
         </div>
-        <button
-          v-if="proxyRunning && proxyUrl"
-          @click="copyProxyUrl"
-          class="btn btn-secondary"
-        >
-          {{ copySuccess ? 'Copied!' : 'Copy URL' }}
-        </button>
-      </div>
-      <div v-if="proxyUrl" class="proxy-url">
-        Proxy URL: <code>{{ proxyUrl }}</code>
       </div>
     </section>
 
@@ -155,163 +163,236 @@ async function copyProxyUrl() {
 
 <style scoped>
 .settings {
-  padding: 24px;
-  color: #e5e7eb;
+  padding: 28px;
+  color: var(--text);
   max-width: 960px;
   margin: 0 auto;
 }
 
 .page-title {
-  margin: 0 0 20px 0;
-  font-size: 22px;
-  font-weight: 600;
+  margin: 0 0 28px 0;
+  font-size: 24px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--text), var(--text-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .section {
-  margin-bottom: 32px;
+  margin-bottom: 36px;
 }
 
-.section h3 {
-  margin: 0 0 12px 0;
+/* Section title with gradient underline */
+.section-title {
+  margin: 0 0 16px 0;
   font-size: 16px;
   font-weight: 600;
+  color: var(--text-secondary);
+  padding-bottom: 10px;
+  position: relative;
+}
+
+.section-title::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 48px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
 }
 
 .section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
-.section-header h3 {
+.section-header .section-title {
   margin: 0;
 }
 
-.btn {
-  padding: 6px 16px;
-  border: none;
-  border-radius: 6px;
+/* Dashed add button with gradient hover */
+.btn-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
   font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: all 0.2s ease;
+}
+
+.btn-add:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(59, 130, 246, 0.06);
+  border-style: solid;
+}
+
+/* Glass proxy card */
+.proxy-card {
+  background: rgba(30, 41, 59, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(71, 85, 105, 0.4);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+/* Buttons */
+.btn {
+  padding: 8px 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
-.btn-primary {
-  background-color: #3b82f6;
+.btn-start {
+  background: linear-gradient(135deg, var(--success), #059669);
   color: white;
+  box-shadow: 0 2px 10px rgba(16, 185, 129, 0.25);
 }
 
-.btn-primary:hover:not(:disabled) {
-  background-color: #2563eb;
+.btn-start:hover:not(:disabled) {
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.35);
+  transform: translateY(-1px);
 }
 
-.btn-success {
-  background-color: #22c55e;
+.btn-stop {
+  background: linear-gradient(135deg, var(--error), #dc2626);
   color: white;
+  box-shadow: 0 2px 10px rgba(239, 68, 68, 0.25);
 }
 
-.btn-danger {
-  background-color: #ef4444;
-  color: white;
+.btn-stop:hover:not(:disabled) {
+  box-shadow: 0 4px 16px rgba(239, 68, 68, 0.35);
+  transform: translateY(-1px);
 }
 
 .btn-secondary {
-  background-color: #374151;
-  color: #e5e7eb;
-  border: 1px solid #4b5563;
+  background-color: var(--surface-light);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background-color: #4b5563;
+  background-color: var(--border);
+  color: var(--text);
 }
 
 .loading, .no-data {
-  color: #9ca3af;
-  padding: 16px;
+  color: var(--text-muted);
+  padding: 24px;
   text-align: center;
 }
 
 .model-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px;
+  gap: 16px;
 }
 
 .proxy-row {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: 14px;
   flex-wrap: wrap;
 }
 
 .proxy-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .proxy-field label {
-  font-size: 12px;
-  color: #9ca3af;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
 }
 
 .proxy-field input {
-  background-color: #374151;
-  color: #e5e7eb;
-  border: 1px solid #4b5563;
-  border-radius: 6px;
-  padding: 6px 10px;
-  width: 100px;
+  background-color: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  width: 110px;
   font-size: 14px;
   outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .proxy-field input:focus {
-  border-color: #3b82f6;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
 }
 
 .proxy-field input:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
 }
 
 .proxy-status {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 14px;
-  padding-bottom: 4px;
+  padding-bottom: 6px;
+  color: var(--text-secondary);
 }
 
 .status-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
+  transition: all 0.3s ease;
 }
 
 .status-dot.active {
-  background-color: #22c55e;
+  background-color: var(--success);
+  box-shadow: 0 0 8px var(--success);
+  animation: status-pulse 2s ease-in-out infinite;
 }
 
 .status-dot.inactive {
-  background-color: #6b7280;
+  background-color: var(--text-muted);
+}
+
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 4px var(--success); }
+  50% { box-shadow: 0 0 12px var(--success); }
 }
 
 .proxy-url {
-  margin-top: 10px;
+  margin-top: 14px;
   font-size: 13px;
-  color: #9ca3af;
+  color: var(--text-muted);
 }
 
 .proxy-url code {
-  background-color: #374151;
-  padding: 2px 6px;
-  border-radius: 4px;
-  color: #60a5fa;
+  background-color: var(--bg);
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: var(--primary);
+  border: 1px solid rgba(71, 85, 105, 0.3);
 }
 </style>
