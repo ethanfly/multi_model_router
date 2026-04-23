@@ -1,10 +1,13 @@
 <script lang="ts" setup>
+import TitleBar from './components/TitleBar.vue'
 </script>
 
 <template>
   <div class="layout">
-    <nav class="sidebar">
-      <div class="nav-logo">
+    <TitleBar />
+    <div class="body">
+      <nav class="sidebar">
+        <div class="nav-logo">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
           <path d="M12 2L2 7l10 5 10-5-10-5z" fill="url(#logoGrad)" />
           <path d="M2 17l10 5 10-5" stroke="url(#logoGrad)" stroke-width="2" fill="none" />
@@ -41,14 +44,22 @@
     <main class="main-content">
       <router-view />
     </main>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .layout {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   width: 100vw;
+  overflow: hidden;
+}
+
+.body {
+  display: flex;
+  flex: 1;
   overflow: hidden;
 }
 

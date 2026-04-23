@@ -6,10 +6,14 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+//go:embed build/appicon.png
+var trayIconData []byte
 
 func main() {
 	app := NewApp()
@@ -21,8 +25,15 @@ func main() {
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
+		OnStartup:     app.startup,
+		OnShutdown:    app.shutdown,
+		OnBeforeClose: app.onBeforeClose,
+		Frameless:     true,
+		Windows: &windows.Options{
+			WebviewIsTransparent: false,
+			WindowIsTranslucent:  false,
+			DisableWindowIcon:    false,
+		},
 		Bind: []interface{}{
 			app,
 		},

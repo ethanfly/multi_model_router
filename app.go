@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sync/atomic"
 	"time"
 
+	"multi_model_router/internal/autostart"
 	"multi_model_router/internal/config"
 	"multi_model_router/internal/crypto"
 	"multi_model_router/internal/db"
@@ -14,18 +17,20 @@ import (
 	"multi_model_router/internal/router"
 	"multi_model_router/internal/stats"
 
+	"fyne.io/systray"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App is the main Wails binding struct.
 type App struct {
-	ctx        context.Context
-	config     *config.Config
-	db         *db.DB
-	engine     *router.Engine
-	classifier *router.Classifier
-	collector  *stats.Collector
-	proxy      *proxy.Server
+	ctx         context.Context
+	config      *config.Config
+	db          *db.DB
+	engine      *router.Engine
+	classifier  *router.Classifier
+	collector   *stats.Collector
+	proxy       *proxy.Server
+	isQuitting  atomic.Bool
 }
 
 // NewApp creates a new App instance with default config.
@@ -49,6 +54,9 @@ func (a *App) startup(ctx context.Context) {
 	a.engine = router.NewEngine(a.classifier)
 	a.loadModels()
 
+	// Start system tray
+	go a.setupSystray()
+
 	// Auto-start proxy if enabled
 	if val, _ := a.db.GetConfig("proxy_enabled"); val == "true" {
 		port := a.config.ProxyPort
@@ -67,6 +75,105 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.db != nil {
 		a.db.Close()
 	}
+	systray.Quit()
+}
+
+// onBeforeClose intercepts the window close event.
+// Returns true to prevent close (hides to tray instead),
+// returns false when quitting to allow normal shutdown.
+func (a *App) onBeforeClose(ctx context.Context) bool {
+	if a.isQuitting.Load() {
+		return false
+	}
+	wailsRuntime.WindowHide(a.ctx)
+	return true
+}
+
+// setupSystray initializes the system tray icon and menu.
+func (a *App) setupSystray() {
+	systray.Run(func() {
+		systray.SetIcon(trayIconData)
+		systray.SetTooltip("Multi-Model Router")
+
+		mShow := systray.AddMenuItem("Show", "Show window")
+		systray.AddSeparator()
+		mQuit := systray.AddMenuItem("Quit", "Quit application")
+
+		go func() {
+			for {
+				select {
+				case <-mShow.ClickedCh:
+					wailsRuntime.WindowShow(a.ctx)
+				case <-mQuit.ClickedCh:
+					a.QuitApp()
+				}
+			}
+		}()
+	}, func() {
+		// onExit - cleanup
+	})
+}
+
+// --- Window control methods ---
+
+// MinimizeWindow minimizes the window.
+func (a *App) MinimizeWindow() {
+	wailsRuntime.WindowMinimise(a.ctx)
+}
+
+// ToggleMaximizeWindow toggles the window maximize state.
+// Returns true if now maximized, false if not.
+func (a *App) ToggleMaximizeWindow() bool {
+	if wailsRuntime.WindowIsMaximised(a.ctx) {
+		wailsRuntime.WindowUnmaximise(a.ctx)
+		return false
+	}
+	wailsRuntime.WindowMaximise(a.ctx)
+	return true
+}
+
+// IsWindowMaximized returns whether the window is maximized.
+func (a *App) IsWindowMaximized() bool {
+	return wailsRuntime.WindowIsMaximised(a.ctx)
+}
+
+// HideWindow hides the window to the system tray.
+func (a *App) HideWindow() {
+	wailsRuntime.WindowHide(a.ctx)
+}
+
+// QuitApp cleanly exits the application from the system tray.
+func (a *App) QuitApp() {
+	a.isQuitting.Store(true)
+	if a.proxy != nil {
+		a.proxy.Stop()
+	}
+	if a.db != nil {
+		a.db.Close()
+	}
+	systray.Quit()
+	os.Exit(0)
+}
+
+// --- Auto-start methods ---
+
+// GetAutoStart returns whether auto-start on boot is enabled.
+func (a *App) GetAutoStart() bool {
+	return autostart.IsEnabled()
+}
+
+// SetAutoStart enables or disables auto-start on boot.
+func (a *App) SetAutoStart(enabled bool) string {
+	if enabled {
+		if err := autostart.Enable(); err != nil {
+			return "error: " + err.Error()
+		}
+		return "OK"
+	}
+	if err := autostart.Disable(); err != nil {
+		return "error: " + err.Error()
+	}
+	return "OK"
 }
 
 // loadModels loads all models from the database into the engine.
@@ -128,8 +235,6 @@ func (a *App) reloadModels() {
 
 // ensureProvider creates and registers a provider if it doesn't already exist.
 func (a *App) ensureProvider(providerName, baseURL, apiKey string) {
-	// The engine stores providers in a map; we add the provider regardless
-	// to ensure the key is populated (the engine uses a sync map internally).
 	switch providerName {
 	case "openai":
 		a.engine.AddProvider(providerName, provider.NewOpenAI(baseURL, apiKey))

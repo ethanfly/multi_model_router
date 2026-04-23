@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted } from 'vue'
 import { useModelsStore } from '../stores/models'
-import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig } from '../../wailsjs/go/main/App'
+import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
 import ModelCard from '../components/ModelCard.vue'
 import ModelEditor from '../components/ModelEditor.vue'
 import type { Model } from '../stores/models'
@@ -16,10 +16,12 @@ const proxyPort = ref(8080)
 const proxyUrl = ref('')
 const proxyLoading = ref(false)
 const copySuccess = ref(false)
+const autoStartEnabled = ref(false)
 
 onMounted(async () => {
   await modelsStore.fetchModels()
   await loadProxyStatus()
+  autoStartEnabled.value = await GetAutoStart()
   try {
     const port = await GetConfig('proxyPort')
     if (port) proxyPort.value = parseInt(port, 10) || 8080
@@ -80,11 +82,35 @@ async function copyProxyUrl() {
     setTimeout(() => { copySuccess.value = false }, 1500)
   } catch { /* ignore */ }
 }
+
+async function toggleAutoStart() {
+  const result = await SetAutoStartFn(autoStartEnabled.value)
+  if (result !== 'OK') {
+    alert('Failed to set auto-start: ' + result)
+    autoStartEnabled.value = !autoStartEnabled.value
+  }
+}
 </script>
 
 <template>
   <div class="settings">
     <h2 class="page-title">Settings</h2>
+
+    <section class="section">
+      <h3 class="section-title">General</h3>
+      <div class="general-card">
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <span class="toggle-label">Auto-start on boot</span>
+            <span class="toggle-desc">Launch Multi-Model Router when Windows starts</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" v-model="autoStartEnabled" @change="toggleAutoStart" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+    </section>
 
     <section class="section">
       <div class="section-header">
@@ -394,5 +420,83 @@ async function copyProxyUrl() {
   border-radius: 6px;
   color: var(--primary);
   border: 1px solid rgba(71, 85, 105, 0.3);
+}
+
+/* General settings card */
+.general-card {
+  background: rgba(30, 41, 59, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(71, 85, 105, 0.4);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.toggle-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.toggle-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.toggle-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--border);
+  border-radius: 24px;
+  transition: all 0.3s ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(20px);
 }
 </style>

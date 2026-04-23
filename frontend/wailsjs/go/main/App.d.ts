@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function DeleteModel(arg1:string):Promise<void>;
 
+export function GetAutoStart():Promise<boolean>;
+
 export function GetConfig(arg1:string):Promise<string>;
 
 export function GetDashboardStats():Promise<Record<string, any>>;
@@ -12,9 +14,19 @@ export function GetModels():Promise<Array<main.ModelJSON>>;
 
 export function GetProxyStatus():Promise<Record<string, any>>;
 
+export function HideWindow():Promise<void>;
+
+export function IsWindowMaximized():Promise<boolean>;
+
+export function MinimizeWindow():Promise<void>;
+
+export function QuitApp():Promise<void>;
+
 export function SaveModel(arg1:main.ModelJSON):Promise<void>;
 
 export function SendChat(arg1:main.ChatRequest):Promise<main.ChatResponse>;
+
+export function SetAutoStart(arg1:boolean):Promise<string>;
 
 export function SetConfig(arg1:string,arg2:string):Promise<string>;
 
@@ -23,3 +35,5 @@ export function StartProxy(arg1:number):Promise<string>;
 export function StopProxy():Promise<string>;
 
 export function TestModel(arg1:main.ModelJSON):Promise<string>;
+
+export function ToggleMaximizeWindow():Promise<boolean>;

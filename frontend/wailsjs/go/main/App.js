@@ -6,6 +6,10 @@ export function DeleteModel(arg1) {
   return window['go']['main']['App']['DeleteModel'](arg1);
 }
 
+export function GetAutoStart() {
+  return window['go']['main']['App']['GetAutoStart']();
+}
+
 export function GetConfig(arg1) {
   return window['go']['main']['App']['GetConfig'](arg1);
 }
@@ -22,12 +26,32 @@ export function GetProxyStatus() {
   return window['go']['main']['App']['GetProxyStatus']();
 }
 
+export function HideWindow() {
+  return window['go']['main']['App']['HideWindow']();
+}
+
+export function IsWindowMaximized() {
+  return window['go']['main']['App']['IsWindowMaximized']();
+}
+
+export function MinimizeWindow() {
+  return window['go']['main']['App']['MinimizeWindow']();
+}
+
+export function QuitApp() {
+  return window['go']['main']['App']['QuitApp']();
+}
+
 export function SaveModel(arg1) {
   return window['go']['main']['App']['SaveModel'](arg1);
 }
 
 export function SendChat(arg1) {
   return window['go']['main']['App']['SendChat'](arg1);
+}
+
+export function SetAutoStart(arg1) {
+  return window['go']['main']['App']['SetAutoStart'](arg1);
 }
 
 export function SetConfig(arg1, arg2) {
@@ -44,4 +68,8 @@ export function StopProxy() {
 
 export function TestModel(arg1) {
   return window['go']['main']['App']['TestModel'](arg1);
+}
+
+export function ToggleMaximizeWindow() {
+  return window['go']['main']['App']['ToggleMaximizeWindow']();
 }
