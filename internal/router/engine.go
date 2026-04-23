@@ -98,10 +98,12 @@ var complexityWeights = map[Complexity]struct {
 
 // RouteRequest is the input to the router engine.
 type RouteRequest struct {
-	Messages []provider.Message
-	Mode     RouteMode
-	ModelID  string
-	Source   string
+	Messages    []provider.Message
+	Mode        RouteMode
+	ModelID     string
+	Source      string
+	MaxTokens   int
+	Temperature float64
 }
 
 // RouteResult is the output from the router engine.
@@ -356,9 +358,11 @@ func (e *Engine) sendToModel(ctx context.Context, cfg *ModelConfig, req *RouteRe
 	start := time.Now()
 
 	chatReq := &provider.ChatRequest{
-		Model:    cfg.ModelID,
-		Messages: req.Messages,
-		Stream:   true,
+		Model:       cfg.ModelID,
+		Messages:    req.Messages,
+		Stream:      true,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
 	}
 
 	stream, err := cfg.ProviderInstance.ChatCompletion(ctx, chatReq)
@@ -397,6 +401,75 @@ func messagesToString(msgs []provider.Message) string {
 		sb += msgs[i].ExtractText()
 	}
 	return sb
+}
+
+// ListActiveModels returns all active model configurations.
+func (e *Engine) ListActiveModels() []*ModelConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	var active []*ModelConfig
+	for _, m := range e.models {
+		if m.IsActive {
+			active = append(active, m)
+		}
+	}
+	return active
+}
+
+// ProviderInfo holds the information needed to forward a request to an upstream provider.
+type ProviderInfo struct {
+	BaseURL  string
+	APIKey   string
+	ModelID  string
+	Provider string // "openai" or "anthropic"
+}
+
+// ResolveProvider finds the provider configuration for the given model reference.
+// It matches by ModelID, ID, or Name. Falls back to the first active model if no match.
+func (e *Engine) ResolveProvider(modelRef string) (ProviderInfo, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// Exact match by ModelID, ID, or Name
+	for _, m := range e.models {
+		if !m.IsActive {
+			continue
+		}
+		if m.ModelID == modelRef || m.ID == modelRef || m.Name == modelRef {
+			return ProviderInfo{
+				BaseURL:  m.BaseURL,
+				APIKey:   m.APIKey,
+				ModelID:  m.ModelID,
+				Provider: m.Provider,
+			}, true
+		}
+	}
+
+	// Fallback: first active OpenAI-compatible provider
+	for _, m := range e.models {
+		if m.IsActive && m.Provider == "openai" {
+			return ProviderInfo{
+				BaseURL:  m.BaseURL,
+				APIKey:   m.APIKey,
+				ModelID:  m.ModelID,
+				Provider: m.Provider,
+			}, true
+		}
+	}
+
+	// Last resort: any active provider
+	for _, m := range e.models {
+		if m.IsActive {
+			return ProviderInfo{
+				BaseURL:  m.BaseURL,
+				APIKey:   m.APIKey,
+				ModelID:  m.ModelID,
+				Provider: m.Provider,
+			}, true
+		}
+	}
+
+	return ProviderInfo{}, false
 }
 
 // NewUUID generates a new UUID string.

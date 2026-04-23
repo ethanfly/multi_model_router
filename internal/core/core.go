@@ -135,6 +135,7 @@ func (c *Core) SetClassifierConfig(cfg *router.ClassifierConfig) error {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
 		}
 		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			log.Printf("failed to restart proxy after classifier config change: %v", err)
 		}

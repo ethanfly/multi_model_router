@@ -188,6 +188,7 @@ func (c *Core) SaveModel(m ModelJSON) error {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
 		}
 		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			log.Printf("failed to restart proxy after model save: %v", err)
 		}
@@ -223,6 +224,7 @@ func (c *Core) DeleteModel(id string) error {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
 		}
 		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			log.Printf("failed to restart proxy after model delete: %v", err)
 		}

@@ -2,9 +2,11 @@ package core
 
 import (
 	"fmt"
+	"time"
 
 	"multi_model_router/internal/proxy"
 	"multi_model_router/internal/router"
+	"multi_model_router/internal/stats"
 )
 
 // StartProxy starts the proxy server on the given port.
@@ -25,6 +27,7 @@ func (c *Core) StartProxy(port int) error {
 		proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
 	}
 	c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+	c.wireProxyLogger()
 	if err := c.proxy.Start(); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -104,10 +107,35 @@ func (c *Core) SetProxyMode(mode string) error {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
 		}
 		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			return fmt.Errorf("restart proxy with new mode: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// wireProxyLogger sets the OnRequestLog callback to record proxy stats.
+func (c *Core) wireProxyLogger() {
+	if c.proxy == nil {
+		return
+	}
+	c.proxy.OnRequestLog = func(entry *proxy.RequestLogEntry) {
+		if c.collector == nil {
+			return
+		}
+		_ = c.collector.LogRequest(&stats.RequestLog{
+			ModelID:    entry.ModelName,
+			Source:     entry.Source,
+			Complexity: router.Complexity(entry.Complexity).String(),
+			RouteMode:  entry.RouteMode,
+			Status:     entry.Status,
+			TokensIn:   entry.TokensIn,
+			TokensOut:  entry.TokensOut,
+			LatencyMs:  entry.LatencyMs,
+			ErrorMsg:   entry.ErrorMsg,
+			CreatedAt:  time.Now(),
+		})
+	}
 }

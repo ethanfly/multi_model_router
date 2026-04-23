@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -18,14 +20,47 @@ type Router interface {
 	Route(ctx context.Context, req *router.RouteRequest) *router.RouteResult
 }
 
-// Server is a local HTTP proxy that accepts OpenAI-compatible requests
-// and routes them through the router engine.
+// ModelLister provides model listing capability.
+type ModelLister interface {
+	ListActiveModels() []*router.ModelConfig
+}
+
+// ProviderResolver resolves a model reference to an upstream provider config.
+type ProviderResolver interface {
+	ResolveProvider(modelRef string) (router.ProviderInfo, bool)
+}
+
+// RequestLogEntry is the data passed to the OnRequestLog callback after each request.
+type RequestLogEntry struct {
+	ModelName  string
+	Source     string
+	Complexity int64
+	RouteMode  string
+	Status     string
+	TokensIn   int
+	TokensOut  int
+	LatencyMs  int64
+	ErrorMsg   string
+}
+
+// Server is a local HTTP proxy that accepts OpenAI-compatible and Anthropic-compatible
+// requests and routes them through the router engine.
 type Server struct {
-	port        int
-	router      Router
-	server      *http.Server
-	defaultMode router.RouteMode
-	apiKey      string
+	port         int
+	router       Router
+	server       *http.Server
+	defaultMode  router.RouteMode
+	apiKey       string
+	httpClient   *http.Client
+	OnRequestLog func(entry *RequestLogEntry) // optional stats callback
+}
+
+// requestStats tracks metrics during response writing.
+type requestStats struct {
+	tokensIn  int
+	tokensOut int
+	status    string // "success" or "error"
+	errMsg    string
 }
 
 // New creates a new proxy Server listening on the given port with a default route mode.
@@ -35,15 +70,29 @@ func New(port int, r Router, mode router.RouteMode, apiKey string) *Server {
 		router:      r,
 		defaultMode: mode,
 		apiKey:      apiKey,
+		httpClient:  &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
 // Start creates the HTTP mux and starts listening in a goroutine.
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
+
+	// Chat endpoints (full protocol support)
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletion)
 	mux.HandleFunc("/v1/messages", s.handleChatCompletion)
-	mux.HandleFunc("/", s.handleNotFound)
+
+	// Model listing endpoints
+	mux.HandleFunc("/v1/models", s.handleModels)
+	mux.HandleFunc("/v1/models/", s.handleModels)
+
+	// Generic passthrough for all other /v1/* endpoints
+	// Covers: embeddings, completions, images, audio, moderations, etc.
+	mux.HandleFunc("/v1/", s.handlePassthrough)
+
+	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/", s.handleHealth)
 
 	s.server = &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.port),
@@ -74,82 +123,258 @@ func (s *Server) Port() int {
 	return s.port
 }
 
-// handleChatCompletion handles POST /v1/chat/completions and /v1/messages.
+// ---- Models Endpoint ----
+
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	ml, ok := s.router.(ModelLister)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "model listing not supported"})
+		return
+	}
+
+	models := ml.ListActiveModels()
+	path := r.URL.Path
+
+	// Single model: /v1/models/{id}
+	if path != "/v1/models" && path != "/v1/models/" {
+		modelID := strings.TrimPrefix(path, "/v1/models/")
+		for _, m := range models {
+			if m.ModelID == modelID || m.ID == modelID || m.Name == modelID {
+				writeJSON(w, http.StatusOK, formatOpenAIModel(m))
+				return
+			}
+		}
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{
+			"error": map[string]string{
+				"message": fmt.Sprintf("model %s not found", modelID),
+				"type":    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	// List all models
+	data := make([]interface{}, 0, len(models))
+	for _, m := range models {
+		data = append(data, formatOpenAIModel(m))
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"object": "list",
+		"data":   data,
+	})
+}
+
+func formatOpenAIModel(m *router.ModelConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"id":       m.ModelID,
+		"object":   "model",
+		"created":  time.Now().Unix(),
+		"owned_by": m.Provider,
+	}
+}
+
+// ---- Generic Passthrough ----
+
+func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
+	pr, ok := s.router.(ProviderResolver)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "endpoint not supported"})
+		return
+	}
+
+	// Read body and try to extract model name
+	var bodyBytes []byte
+	var modelRef string
+
+	if r.Body != nil && r.ContentLength != 0 {
+		bodyBytes, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		r.Body.Close()
+
+		var partial struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(bodyBytes, &partial) == nil {
+			modelRef = partial.Model
+		}
+	}
+
+	info, found := pr.ResolveProvider(modelRef)
+	if !found {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "no upstream provider available"})
+		return
+	}
+
+	// Build upstream URL
+	targetURL := strings.TrimSuffix(info.BaseURL, "/") + r.URL.Path
+
+	// Create forwarded request
+	var bodyReader io.Reader
+	if len(bodyBytes) > 0 {
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bodyReader)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create proxy request"})
+		return
+	}
+
+	// Copy original headers
+	for k, vv := range r.Header {
+		proxyReq.Header[k] = vv
+	}
+
+	// Set auth based on provider type
+	switch info.Provider {
+	case "anthropic":
+		proxyReq.Header.Set("x-api-key", info.APIKey)
+		proxyReq.Header.Set("anthropic-version", "2023-06-01")
+		proxyReq.Header.Del("Authorization")
+	default:
+		proxyReq.Header.Set("Authorization", "Bearer "+info.APIKey)
+		proxyReq.Header.Del("x-api-key")
+	}
+
+	// Forward
+	resp, err := s.httpClient.Do(proxyReq)
+	if err != nil {
+		log.Printf("passthrough error for %s: %v", r.URL.Path, err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("upstream request failed: %v", err)})
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream response body back
+	flusher, canFlush := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+}
+
+// ---- Chat Completion Endpoint ----
+
+type proxyRequest struct {
+	Model       string          `json:"model"`
+	Messages    []proxyMessage  `json:"messages"`
+	Stream      bool            `json:"stream"`
+	MaxTokens   int             `json:"max_tokens"`
+	Temperature float64         `json:"temperature"`
+	System      json.RawMessage `json:"system"` // Anthropic-specific
+}
+
+type proxyMessage struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
 func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
+	isAnthropic := strings.HasSuffix(r.URL.Path, "/messages")
+
 	// API key authentication
 	if s.apiKey != "" {
 		authHeader := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		if token == "" || token == authHeader {
-			// No Bearer token — also check x-api-key header
 			token = r.Header.Get("x-api-key")
 		}
 		if token != s.apiKey {
-			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-				"error": map[string]string{
-					"message": "invalid or missing API key",
-					"type":    "authentication_error",
-				},
-			})
+			if isAnthropic {
+				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+					"type":  "error",
+					"error": map[string]string{"type": "authentication_error", "message": "invalid or missing API key"},
+				})
+			} else {
+				writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+					"error": map[string]string{"message": "invalid or missing API key", "type": "authentication_error"},
+				})
+			}
 			return
 		}
 	}
 
-	body, err := provider.ReadBody(r.Body, 1<<20) // 1MB limit
+	body, err := provider.ReadBody(r.Body, 1<<20)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
 		return
 	}
 
-	var req struct {
-		Model    string `json:"model"`
-		Messages []struct {
-			Role    string      `json:"role"`
-			Content interface{} `json:"content"`
-		} `json:"messages"`
-		Stream bool `json:"stream"`
-	}
+	var req proxyRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		if isAnthropic {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"type":  "error",
+				"error": map[string]string{"type": "invalid_request_error", "message": "invalid JSON"},
+			})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		}
 		return
 	}
 
-	// Convert to provider.Message slice.
-	msgs := make([]provider.Message, len(req.Messages))
-	for i, m := range req.Messages {
-		msgs[i] = provider.Message{Role: m.Role, Content: m.Content}
+	// Build provider.Message slice
+	msgs := make([]provider.Message, 0, len(req.Messages)+1)
+
+	// For Anthropic requests, convert top-level system field to a system message
+	if isAnthropic && len(req.System) > 0 {
+		systemText := extractSystemText(req.System)
+		if systemText != "" {
+			msgs = append(msgs, provider.Message{Role: "system", Content: systemText})
+		}
 	}
 
-	// Determine route mode based on model field:
-	// - "auto" or empty → use default mode
-	// - specific model name → manual mode (route to that model)
+	for _, m := range req.Messages {
+		msgs = append(msgs, provider.Message{Role: m.Role, Content: m.Content})
+	}
+
+	// Determine route mode based on model field
 	mode := s.defaultMode
 	modelID := ""
 	switch {
 	case req.Model == "" || req.Model == "auto":
-		// Use default mode
 	case req.Model == "race":
 		mode = router.RouteRace
 	default:
-		// Specific model name → manual mode
 		mode = router.RouteManual
 		modelID = req.Model
 	}
 
-	// Header override still takes priority
 	if h := r.Header.Get("X-Router-Mode"); h != "" {
 		mode = router.RouteModeFromString(h)
 	}
 
 	routeReq := &router.RouteRequest{
-		Messages: msgs,
-		Mode:     mode,
-		ModelID:  modelID,
+		Messages:    msgs,
+		Mode:        mode,
+		ModelID:     modelID,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
 	}
 
 	result := s.router.Route(r.Context(), routeReq)
@@ -158,79 +383,277 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		if result != nil && result.ErrorMsg != "" {
 			errMsg = result.ErrorMsg
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": errMsg})
+		if isAnthropic {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+				"type":  "error",
+				"error": map[string]string{"type": "api_error", "message": errMsg},
+			})
+		} else {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": errMsg})
+		}
 		return
 	}
 
-	// Set response headers.
 	w.Header().Set("X-Router-Model", result.ModelName)
 	w.Header().Set("X-Router-Complexity", fmt.Sprintf("%d", result.Complexity))
 
-	// Stream the response as SSE.
+	start := time.Now()
+	var rs requestStats
+
+	if isAnthropic {
+		if req.Stream {
+			s.writeAnthropicStream(w, result, &rs)
+		} else {
+			s.writeAnthropicNonStream(w, result, &rs)
+		}
+	} else {
+		if req.Stream {
+			s.writeOpenAIStream(w, result, &rs)
+		} else {
+			s.writeOpenAINonStream(w, result, &rs)
+		}
+	}
+
+	// Log request stats
+	if s.OnRequestLog != nil && rs.status != "" {
+		s.OnRequestLog(&RequestLogEntry{
+			ModelName:  result.ModelName,
+			Source:     "proxy",
+			Complexity: result.Complexity,
+			RouteMode:  mode.String(),
+			Status:     rs.status,
+			TokensIn:   rs.tokensIn,
+			TokensOut:  rs.tokensOut,
+			LatencyMs:  time.Since(start).Milliseconds(),
+			ErrorMsg:   rs.errMsg,
+		})
+	}
+}
+
+// extractSystemText extracts text from Anthropic's system field.
+func extractSystemText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &blocks) == nil {
+		var texts []string
+		for _, b := range blocks {
+			if b.Type == "text" {
+				texts = append(texts, b.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return ""
+}
+
+// ---- OpenAI Response Writers ----
+
+func (s *Server) writeOpenAIStream(w http.ResponseWriter, result *router.RouteResult, rs *requestStats) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
 	flusher, canFlush := w.(http.Flusher)
+	completionID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	created := time.Now().Unix()
+
+	// Initial role chunk
+	writeSSE(w, flusher, canFlush, map[string]interface{}{
+		"id":      completionID,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   result.ModelName,
+		"choices": []map[string]interface{}{
+			{"index": 0, "delta": map[string]string{"role": "assistant"}, "finish_reason": nil},
+		},
+	})
 
 	var hasSentContent bool
-	var gotError bool
-
 	for chunk := range result.Stream {
 		if chunk.Error != nil {
 			log.Printf("stream error: %v", chunk.Error)
-			// Send error as SSE to client
-			errResp := map[string]interface{}{
-				"error": map[string]string{
-					"message": chunk.Error.Error(),
-					"type":    "stream_error",
+			rs.status = "error"
+			rs.errMsg = chunk.Error.Error()
+			writeSSE(w, flusher, canFlush, map[string]interface{}{
+				"error": map[string]string{"message": chunk.Error.Error(), "type": "stream_error"},
+			})
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			if canFlush {
+				flusher.Flush()
+			}
+			return
+		}
+
+		if chunk.Done {
+			doneData := map[string]interface{}{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   chunk.Model,
+				"choices": []map[string]interface{}{
+					{"index": 0, "delta": map[string]interface{}{}, "finish_reason": "stop"},
 				},
 			}
-			if b, err := json.Marshal(errResp); err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", b)
-				if canFlush {
-					flusher.Flush()
+			if chunk.Usage != nil {
+				doneData["usage"] = map[string]interface{}{
+					"prompt_tokens":     chunk.Usage.InputTokens,
+					"completion_tokens": chunk.Usage.OutputTokens,
+					"total_tokens":      chunk.Usage.InputTokens + chunk.Usage.OutputTokens,
 				}
+				rs.tokensIn = chunk.Usage.InputTokens
+				rs.tokensOut = chunk.Usage.OutputTokens
 			}
-			gotError = true
+			writeSSE(w, flusher, canFlush, doneData)
+			hasSentContent = true
+			rs.status = "success"
 			break
 		}
 
-		data := map[string]interface{}{
-			"choices": []map[string]interface{}{
-				{
-					"delta": map[string]string{
-						"content": chunk.Content,
-					},
+		if chunk.Content != "" {
+			writeSSE(w, flusher, canFlush, map[string]interface{}{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   chunk.Model,
+				"choices": []map[string]interface{}{
+					{"index": 0, "delta": map[string]string{"content": chunk.Content}, "finish_reason": nil},
 				},
+			})
+			hasSentContent = true
+		}
+	}
+
+	if !hasSentContent {
+		log.Printf("warning: no content from upstream model %s", result.ModelName)
+	}
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	if canFlush {
+		flusher.Flush()
+	}
+}
+
+func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.RouteResult, rs *requestStats) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var content string
+	var usage *provider.Usage
+	for chunk := range result.Stream {
+		if chunk.Error != nil {
+			rs.status = "error"
+			rs.errMsg = chunk.Error.Error()
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+				"error": map[string]string{"message": chunk.Error.Error(), "type": "upstream_error"},
+			})
+			return
+		}
+		content += chunk.Content
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if chunk.Done {
+			break
+		}
+	}
+
+	rs.status = "success"
+	if usage != nil {
+		rs.tokensIn = usage.InputTokens
+		rs.tokensOut = usage.OutputTokens
+	}
+
+	resp := map[string]interface{}{
+		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   result.ModelName,
+		"choices": []map[string]interface{}{
+			{
+				"index":         0,
+				"message":       map[string]interface{}{"role": "assistant", "content": content},
+				"finish_reason": "stop",
 			},
-			"model": chunk.Model,
+		},
+	}
+	if usage != nil {
+		resp["usage"] = map[string]interface{}{
+			"prompt_tokens":     usage.InputTokens,
+			"completion_tokens": usage.OutputTokens,
+			"total_tokens":      usage.InputTokens + usage.OutputTokens,
 		}
-		b, err := json.Marshal(data)
-		if err != nil {
-			log.Printf("json marshaling error on response chunk: %v", err)
-			// Send error to client
-			errResp := map[string]interface{}{
-				"error": map[string]string{
-					"message": fmt.Sprintf("internal error: failed to encode response: %v", err),
-					"type":    "encoding_error",
-				},
-			}
-			if bErr, errMarshal := json.Marshal(errResp); errMarshal == nil {
-				fmt.Fprintf(w, "data: %s\n\n", bErr)
-				if canFlush {
-					flusher.Flush()
-				}
-			}
-			gotError = true
-			break
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---- Anthropic Response Writers ----
+
+func (s *Server) writeAnthropicStream(w http.ResponseWriter, result *router.RouteResult, rs *requestStats) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	flusher, canFlush := w.(http.Flusher)
+	msgID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
+
+	// message_start
+	writeAnthropicSSE(w, flusher, canFlush, "message_start", map[string]interface{}{
+		"type": "message_start",
+		"message": map[string]interface{}{
+			"id":            msgID,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []interface{}{},
+			"model":         result.ModelName,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage":         map[string]int{"input_tokens": 0, "output_tokens": 0},
+		},
+	})
+
+	// content_block_start
+	writeAnthropicSSE(w, flusher, canFlush, "content_block_start", map[string]interface{}{
+		"type":  "content_block_start",
+		"index": 0,
+		"content_block": map[string]string{
+			"type": "text",
+			"text": "",
+		},
+	})
+
+	var outputTokens int
+
+	for chunk := range result.Stream {
+		if chunk.Error != nil {
+			log.Printf("stream error (anthropic): %v", chunk.Error)
+			rs.status = "error"
+			rs.errMsg = chunk.Error.Error()
+			writeAnthropicSSE(w, flusher, canFlush, "error", map[string]interface{}{
+				"type":  "error",
+				"error": map[string]string{"type": "stream_error", "message": chunk.Error.Error()},
+			})
+			return
 		}
 
-		fmt.Fprintf(w, "data: %s\n\n", b)
-		hasSentContent = true
+		if chunk.Usage != nil {
+			outputTokens = chunk.Usage.OutputTokens
+			rs.tokensIn = chunk.Usage.InputTokens
+			rs.tokensOut = chunk.Usage.OutputTokens
+		}
 
-		if canFlush {
-			flusher.Flush()
+		if chunk.Content != "" {
+			writeAnthropicSSE(w, flusher, canFlush, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": 0,
+				"delta": map[string]string{"type": "text_delta", "text": chunk.Content},
+			})
 		}
 
 		if chunk.Done {
@@ -238,38 +661,128 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !gotError {
-		// If no error and no content was received, send an explicit error
-		if !hasSentContent {
-			errResp := map[string]interface{}{
-				"error": map[string]string{
-					"message": "no content was received from the model",
-					"type":    "empty_response",
-				},
-			}
-			if b, err := json.Marshal(errResp); err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", b)
-				if canFlush {
-					flusher.Flush()
-				}
-			}
-		}
-		// Always send [DONE] in OpenAI protocol when no error
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		if canFlush {
-			flusher.Flush()
-		}
-	}
-}
+	// content_block_stop
+	rs.status = "success"
+	writeAnthropicSSE(w, flusher, canFlush, "content_block_stop", map[string]interface{}{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
 
-// handleNotFound returns a helpful JSON message for unmatched routes.
-func (s *Server) handleNotFound(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusNotFound, map[string]string{
-		"message": "Multi-Model Router proxy running. Use /v1/chat/completions",
+	// message_delta
+	writeAnthropicSSE(w, flusher, canFlush, "message_delta", map[string]interface{}{
+		"type": "message_delta",
+		"delta": map[string]interface{}{
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+		},
+		"usage": map[string]int{"output_tokens": outputTokens},
+	})
+
+	// message_stop
+	writeAnthropicSSE(w, flusher, canFlush, "message_stop", map[string]interface{}{
+		"type": "message_stop",
 	})
 }
 
-// writeJSON writes a JSON response with the given status code.
+func (s *Server) writeAnthropicNonStream(w http.ResponseWriter, result *router.RouteResult, rs *requestStats) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var content string
+	var usage *provider.Usage
+	for chunk := range result.Stream {
+		if chunk.Error != nil {
+			rs.status = "error"
+			rs.errMsg = chunk.Error.Error()
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+				"type":  "error",
+				"error": map[string]string{"type": "upstream_error", "message": chunk.Error.Error()},
+			})
+			return
+		}
+		content += chunk.Content
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if chunk.Done {
+			break
+		}
+	}
+
+	rs.status = "success"
+	if usage != nil {
+		rs.tokensIn = usage.InputTokens
+		rs.tokensOut = usage.OutputTokens
+	}
+
+	resp := map[string]interface{}{
+		"id":            fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         result.ModelName,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"content": []map[string]string{
+			{"type": "text", "text": content},
+		},
+	}
+	if usage != nil {
+		resp["usage"] = map[string]interface{}{
+			"input_tokens":  usage.InputTokens,
+			"output_tokens": usage.OutputTokens,
+		}
+	} else {
+		resp["usage"] = map[string]interface{}{
+			"input_tokens":  0,
+			"output_tokens": 0,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---- SSE Helpers ----
+
+func writeSSE(w http.ResponseWriter, flusher http.Flusher, canFlush bool, data interface{}) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", b)
+	if canFlush {
+		flusher.Flush()
+	}
+}
+
+func writeAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, canFlush bool, event string, data interface{}) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+	if canFlush {
+		flusher.Flush()
+	}
+}
+
+// ---- Helpers ----
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	activeModels := 0
+	if ml, ok := s.router.(ModelLister); ok {
+		activeModels = len(ml.ListActiveModels())
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":        "ok",
+		"service":       "multi-model-router",
+		"active_models": activeModels,
+		"endpoints": []string{
+			"POST /v1/chat/completions",
+			"POST /v1/messages",
+			"GET  /v1/models",
+			"GET  /health",
+		},
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
