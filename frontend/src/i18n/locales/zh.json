@@ -46,6 +46,8 @@
     "languageDesc": "选择显示语言",
     "autoStart": "开机自启动",
     "autoStartDesc": "Windows 启动时自动运行 Multi-Model Router",
+    "autoStartProxy": "启动时自动开启代理",
+    "autoStartProxyDesc": "应用启动时自动启动 API 代理服务",
     "models": "模型管理",
     "addModel": "添加模型",
     "loadingModels": "加载模型中...",

@@ -46,6 +46,8 @@
     "languageDesc": "Choose display language",
     "autoStart": "Auto-start on boot",
     "autoStartDesc": "Launch Multi-Model Router when Windows starts",
+    "autoStartProxy": "Auto-start proxy on launch",
+    "autoStartProxyDesc": "Automatically start the API proxy when the app launches",
     "models": "Models",
     "addModel": "Add Model",
     "loadingModels": "Loading models...",

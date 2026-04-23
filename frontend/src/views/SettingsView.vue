@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { GetProxyStatus, StartProxy, StopProxy, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
+import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
 
 const proxyRunning = ref(false)
 const proxyPort = ref(9680)
@@ -9,6 +9,7 @@ const proxyUrl = ref('')
 const proxyLoading = ref(false)
 const copySuccess = ref(false)
 const autoStartEnabled = ref(false)
+const proxyAutoStart = ref(false)
 
 const { locale, t } = useI18n()
 const currentLang = computed({
@@ -22,6 +23,10 @@ const currentLang = computed({
 onMounted(async () => {
   try { await loadProxyStatus() } catch { /* ignore */ }
   try { autoStartEnabled.value = await GetAutoStart() } catch { /* ignore */ }
+  try {
+    const v = await GetConfig('proxy_enabled')
+    proxyAutoStart.value = v === 'true'
+  } catch { /* ignore */ }
 })
 
 async function loadProxyStatus() {
@@ -71,6 +76,12 @@ async function toggleAutoStart() {
     autoStartEnabled.value = !autoStartEnabled.value
   }
 }
+
+async function toggleProxyAutoStart() {
+  try {
+    await SetConfig('proxy_enabled', proxyAutoStart.value ? 'true' : 'false')
+  } catch { /* ignore */ }
+}
 </script>
 
 <template>
@@ -97,6 +108,16 @@ async function toggleAutoStart() {
           </div>
           <label class="toggle-switch">
             <input type="checkbox" v-model="autoStartEnabled" @change="toggleAutoStart" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row" style="margin-top: 16px;">
+          <div class="toggle-info">
+            <span class="toggle-label">{{ $t('settings.autoStartProxy') }}</span>
+            <span class="toggle-desc">{{ $t('settings.autoStartProxyDesc') }}</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" v-model="proxyAutoStart" @change="toggleProxyAutoStart" />
             <span class="toggle-slider"></span>
           </label>
         </div>
