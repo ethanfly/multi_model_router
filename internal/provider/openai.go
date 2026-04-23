@@ -18,8 +18,10 @@ type OpenAIProvider struct {
 }
 
 func NewOpenAI(baseURL, apiKey string) *OpenAIProvider {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/v1")
 	return &OpenAIProvider{
-		BaseURL:    strings.TrimSuffix(baseURL, "/"),
+		BaseURL:    baseURL,
 		APIKey:     apiKey,
 		HTTPClient: &http.Client{},
 	}
@@ -163,10 +165,17 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 }
 
 func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", p.BaseURL+"/v1/models", nil)
+	body, _ := json.Marshal(openaiRequest{
+		Model:    "gpt-4o-mini",
+		Messages: []openaiMessage{{Role: "user", Content: "hi"}},
+		MaxTokens: 1,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.APIKey)
 
 	resp, err := p.HTTPClient.Do(req)
@@ -175,6 +184,9 @@ func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("health check failed: invalid API key (status 401)")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("health check failed: status %d", resp.StatusCode)
 	}

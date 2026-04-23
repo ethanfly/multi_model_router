@@ -10,14 +10,14 @@ import (
 
 func TestOpenAIHealthCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			t.Errorf("expected path /v1/models, got %s", r.URL.Path)
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("expected path /v1/chat/completions, got %s", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("expected Authorization Bearer test-key, got %s", r.Header.Get("Authorization"))
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"data":[]}`)
+		fmt.Fprint(w, `{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":1}}`)
 	}))
 	defer server.Close()
 
@@ -38,6 +38,24 @@ func TestOpenAIHealthCheckFailure(t *testing.T) {
 	err := p.HealthCheck(context.Background())
 	if err == nil {
 		t.Fatal("expected error for 401, got nil")
+	}
+}
+
+func TestOpenAIBaseURLNormalization(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"https://api.openai.com", "https://api.openai.com"},
+		{"https://api.openai.com/", "https://api.openai.com"},
+		{"https://api.openai.com/v1", "https://api.openai.com"},
+		{"https://api.openai.com/v1/", "https://api.openai.com"},
+	}
+	for _, tc := range cases {
+		p := NewOpenAI(tc.input, "key")
+		if p.BaseURL != tc.expected {
+			t.Errorf("NewOpenAI(%q): expected %q, got %q", tc.input, tc.expected, p.BaseURL)
+		}
 	}
 }
 

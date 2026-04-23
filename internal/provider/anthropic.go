@@ -18,8 +18,10 @@ type AnthropicProvider struct {
 }
 
 func NewAnthropic(baseURL, apiKey string) *AnthropicProvider {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	baseURL = strings.TrimSuffix(baseURL, "/v1")
 	return &AnthropicProvider{
-		BaseURL:    strings.TrimSuffix(baseURL, "/"),
+		BaseURL:    baseURL,
 		APIKey:     apiKey,
 		HTTPClient: &http.Client{},
 	}
