@@ -77,8 +77,8 @@ async function handleSave(model: Model) {
 .models-page {
   padding: 28px;
   color: var(--text);
-  max-width: 960px;
-  margin: 0 auto;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .page-header {
@@ -127,7 +127,19 @@ async function handleSave(model: Model) {
 
 .model-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
+}
+
+@media (max-width: 900px) {
+  .model-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .model-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
