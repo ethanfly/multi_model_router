@@ -169,8 +169,8 @@ async function toggleProxyAutoStart() {
 .settings {
   padding: 28px;
   color: var(--text);
-  max-width: 960px;
-  margin: 0 auto;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .page-title {
