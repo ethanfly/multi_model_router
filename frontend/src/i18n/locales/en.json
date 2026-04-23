@@ -4,6 +4,7 @@
   },
   "nav": {
     "chat": "Chat",
+    "models": "Models",
     "dashboard": "Dashboard",
     "settings": "Settings"
   },

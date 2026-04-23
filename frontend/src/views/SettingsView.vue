@@ -1,19 +1,10 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useModelsStore } from '../stores/models'
 import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
-import ModelCard from '../components/ModelCard.vue'
-import ModelEditor from '../components/ModelEditor.vue'
-import type { Model } from '../stores/models'
-
-const modelsStore = useModelsStore()
-
-const showEditor = ref(false)
-const editingModel = ref<Model | null>(null)
 
 const proxyRunning = ref(false)
-const proxyPort = ref(8080)
+const proxyPort = ref(9680)
 const proxyUrl = ref('')
 const proxyLoading = ref(false)
 const copySuccess = ref(false)
@@ -29,12 +20,11 @@ const currentLang = computed({
 })
 
 onMounted(async () => {
-  try { await modelsStore.fetchModels() } catch { /* ignore */ }
   try { await loadProxyStatus() } catch { /* ignore */ }
   try { autoStartEnabled.value = await GetAutoStart() } catch { /* ignore */ }
   try {
     const port = await GetConfig('proxyPort')
-    if (port) proxyPort.value = parseInt(port, 10) || 8080
+    if (port) proxyPort.value = parseInt(port, 10) || 9680
   } catch { /* ignore */ }
 })
 
@@ -42,29 +32,9 @@ async function loadProxyStatus() {
   try {
     const status = await GetProxyStatus() as any
     proxyRunning.value = status.running
-    proxyPort.value = status.port || 8080
+    proxyPort.value = status.port || 9680
     proxyUrl.value = status.url || ''
   } catch { /* ignore */ }
-}
-
-function openAddEditor() {
-  editingModel.value = null
-  showEditor.value = true
-}
-
-function openEditEditor(model: Model) {
-  editingModel.value = { ...model }
-  showEditor.value = true
-}
-
-function closeEditor() {
-  showEditor.value = false
-  editingModel.value = null
-}
-
-async function handleSave(model: Model) {
-  await modelsStore.save(model)
-  closeEditor()
 }
 
 async function toggleProxy() {
@@ -138,33 +108,6 @@ async function toggleAutoStart() {
     </section>
 
     <section class="section">
-      <div class="section-header">
-        <h3 class="section-title">{{ $t('settings.models') }}</h3>
-        <button @click="openAddEditor" class="btn btn-add">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          {{ $t('settings.addModel') }}
-        </button>
-      </div>
-
-      <div v-if="modelsStore.loading" class="loading">{{ $t('settings.loadingModels') }}</div>
-      <div v-else-if="modelsStore.models.length === 0" class="no-data">
-        {{ $t('settings.noModels') }}
-      </div>
-      <div v-else class="model-grid">
-        <ModelCard
-          v-for="m in modelsStore.models"
-          :key="m.id"
-          :model="m"
-          @edit="openEditEditor(m)"
-          @delete="modelsStore.remove(m.id)"
-        />
-      </div>
-    </section>
-
-    <section class="section">
       <h3 class="section-title">{{ $t('settings.proxy') }}</h3>
       <div class="proxy-card">
         <div class="proxy-row">
@@ -202,13 +145,6 @@ async function toggleAutoStart() {
         </div>
       </div>
     </section>
-
-    <ModelEditor
-      v-if="showEditor"
-      :model="editingModel"
-      @save="handleSave"
-      @cancel="closeEditor"
-    />
   </div>
 </template>
 
@@ -253,39 +189,6 @@ async function toggleAutoStart() {
   height: 3px;
   border-radius: 2px;
   background: linear-gradient(90deg, var(--primary), var(--accent));
-}
-
-.section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-
-.section-header .section-title {
-  margin: 0;
-}
-
-/* Dashed add button with gradient hover */
-.btn-add {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 18px;
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
-}
-
-.btn-add:hover {
-  border-color: var(--primary);
-  color: var(--primary);
-  background: rgba(59, 130, 246, 0.06);
 }
 
 /* Glass proxy card */
@@ -345,18 +248,6 @@ async function toggleAutoStart() {
 .btn-secondary:hover:not(:disabled) {
   background-color: var(--border);
   color: var(--text);
-}
-
-.loading, .no-data {
-  color: var(--text-muted);
-  padding: 24px;
-  text-align: center;
-}
-
-.model-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
 }
 
 .proxy-row {

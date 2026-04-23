@@ -4,6 +4,8 @@ import (
 	"embed"
 	"os"
 
+	"multi_model_router/internal/cli"
+
 	"github.com/wailsapp/wails/v2"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -20,6 +22,18 @@ func init() {
 }
 
 func main() {
+	// If any CLI arguments are passed, run in CLI mode.
+	if len(os.Args) > 1 {
+		if err := cli.NewRootCommand().Execute(); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+
+	runWails()
+}
+
+func runWails() {
 	app := NewApp()
 	app.setTrayIcon(createTrayIcon())
 

@@ -5,9 +5,9 @@ import {
   SaveModel,
   DeleteModel,
 } from '../../wailsjs/go/main/App'
-import { main } from '../../wailsjs/go/models'
+import { core } from '../../wailsjs/go/models'
 
-type Model = main.ModelJSON
+type Model = core.ModelJSON
 
 export const useModelsStore = defineStore('models', () => {
   const models = ref<Model[]>([])

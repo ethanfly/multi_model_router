@@ -125,6 +125,11 @@ func (c *Core) SaveModel(m ModelJSON) error {
 		return fmt.Errorf("database not initialized")
 	}
 
+	// Generate ID for new models
+	if m.ID == "" {
+		m.ID = router.NewUUID()
+	}
+
 	// Encrypt the API key before storing
 	encryptedKey := m.APIKey
 	if m.APIKey != "" && !(len(m.APIKey) > 8 && m.APIKey[4:7] == "...") {
