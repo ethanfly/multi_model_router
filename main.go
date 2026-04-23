@@ -12,19 +12,17 @@ import (
 var assets embed.FS
 
 func main() {
-	// Create an instance of the app structure
 	app := NewApp()
 
-	// Create application with options
 	err := wails.Run(&options.App{
-		Title:  "multi_model_router",
-		Width:  1024,
-		Height: 768,
+		Title:  "Multi-Model Router",
+		Width:  1200,
+		Height: 800,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
-		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
-		OnStartup:        app.startup,
+		OnStartup:  app.startup,
+		OnShutdown: app.shutdown,
 		Bind: []interface{}{
 			app,
 		},
