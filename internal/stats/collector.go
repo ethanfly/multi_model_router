@@ -182,6 +182,52 @@ type RecentLog struct {
 	CreatedAt  time.Time `json:"createdAt"`
 }
 
+// GetTotalLogCount returns the total number of request log entries.
+func (c *Collector) GetTotalLogCount() (int64, error) {
+	var count int64
+	err := c.db.QueryRow("SELECT COUNT(*) FROM request_logs").Scan(&count)
+	return count, err
+}
+
+// GetRecentLogsPaginated returns logs for a given page with pageSize items.
+// Page is 1-indexed.
+func (c *Collector) GetRecentLogsPaginated(page, pageSize int) ([]RecentLog, error) {
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if page <= 0 {
+		page = 1
+	}
+	offset := (page - 1) * pageSize
+
+	rows, err := c.db.Query(
+		`SELECT id, model_id, source, complexity, tokens_in, tokens_out, latency_ms, created_at
+			 FROM request_logs
+			 ORDER BY created_at DESC
+			 LIMIT ? OFFSET ?`,
+		pageSize, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query recent logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []RecentLog
+	for rows.Next() {
+		var l RecentLog
+		if err := rows.Scan(&l.ID, &l.ModelID, &l.Source, &l.Complexity,
+			&l.TokensIn, &l.TokensOut, &l.LatencyMs, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan recent log: %w", err)
+		}
+		logs = append(logs, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent logs: %w", err)
+	}
+
+	return logs, nil
+}
+
 // GetRecentLogs returns the most recent logs ordered by created_at descending.
 func (c *Collector) GetRecentLogs(limit int) ([]RecentLog, error) {
 	if limit <= 0 {

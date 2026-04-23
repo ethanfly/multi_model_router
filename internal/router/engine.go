@@ -13,20 +13,23 @@ import (
 
 // ModelConfig holds the configuration for a single model.
 type ModelConfig struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Provider      string `json:"provider"`
-	BaseURL       string `json:"base_url"`
-	APIKey        string `json:"api_key"`
-	ModelID       string `json:"model_id"`
-	Reasoning     int    `json:"reasoning"`
-	Coding        int    `json:"coding"`
-	Creativity    int    `json:"creativity"`
-	Speed         int    `json:"speed"`
-	CostEfficiency int   `json:"cost_efficiency"`
-	MaxRPM        int    `json:"max_rpm"`
-	MaxTPM        int    `json:"max_tpm"`
-	IsActive      bool   `json:"is_active"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Provider       string `json:"provider"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+	ModelID        string `json:"model_id"`
+	Reasoning      int    `json:"reasoning"`
+	Coding         int    `json:"coding"`
+	Creativity     int    `json:"creativity"`
+	Speed          int    `json:"speed"`
+	CostEfficiency int    `json:"cost_efficiency"`
+	MaxRPM         int    `json:"max_rpm"`
+	MaxTPM         int    `json:"max_tpm"`
+	IsActive       bool   `json:"is_active"`
+
+	// ProviderInstance is the actual provider client, set at load time.
+	ProviderInstance provider.Provider `json:"-"`
 }
 
 // RouteMode represents the routing mode.
@@ -119,7 +122,6 @@ type RouteResult struct {
 // Engine is the main router engine that selects models and routes requests.
 type Engine struct {
 	classifier  *Classifier
-	providers   map[string]provider.Provider
 	models      map[string]*ModelConfig
 	rateLimits  map[string]time.Time
 	mu          sync.RWMutex
@@ -129,17 +131,15 @@ type Engine struct {
 func NewEngine(classifier *Classifier) *Engine {
 	return &Engine{
 		classifier: classifier,
-		providers:  make(map[string]provider.Provider),
 		models:     make(map[string]*ModelConfig),
 		rateLimits: make(map[string]time.Time),
 	}
 }
 
-// AddProvider registers a provider with the given name.
+// AddProvider is kept for backward compatibility but is a no-op.
+// Each model now carries its own provider instance.
 func (e *Engine) AddProvider(name string, p provider.Provider) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.providers[name] = p
+	// no-op: providers are per-model now
 }
 
 // SetModels replaces the current model configurations.
@@ -200,13 +200,10 @@ func (e *Engine) routeAuto(ctx context.Context, req *RouteRequest) *RouteResult 
 	return result
 }
 
-// routeManual routes the request to a specific model by ID.
+// routeManual routes the request to a specific model by ID or model name.
 func (e *Engine) routeManual(ctx context.Context, req *RouteRequest) *RouteResult {
-	e.mu.RLock()
-	model, ok := e.models[req.ModelID]
-	e.mu.RUnlock()
-
-	if !ok {
+	model := e.findModel(req.ModelID)
+	if model == nil {
 		return &RouteResult{
 			Status:   "error",
 			ErrorMsg: fmt.Sprintf("model %s not found", req.ModelID),
@@ -218,6 +215,26 @@ func (e *Engine) routeManual(ctx context.Context, req *RouteRequest) *RouteResul
 		result.RouteMode = int64(RouteManual)
 	}
 	return result
+}
+
+// findModel looks up a model by internal UUID (ID) or API model name (ModelID).
+func (e *Engine) findModel(idOrName string) *ModelConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	// Try exact UUID match first
+	if m, ok := e.models[idOrName]; ok {
+		return m
+	}
+
+	// Fallback: search by model name (ModelID field)
+	for _, m := range e.models {
+		if m.ModelID == idOrName {
+			return m
+		}
+	}
+
+	return nil
 }
 
 // routeRace sends the request to all active, non-rate-limited models concurrently
@@ -329,14 +346,10 @@ func (e *Engine) selectModelFallback(complexity Complexity, excludeID string) *M
 
 // sendToModel sends a request to the specified model via its provider.
 func (e *Engine) sendToModel(ctx context.Context, cfg *ModelConfig, req *RouteRequest) *RouteResult {
-	e.mu.RLock()
-	p, ok := e.providers[cfg.Provider]
-	e.mu.RUnlock()
-
-	if !ok {
+	if cfg.ProviderInstance == nil {
 		return &RouteResult{
 			Status:   "error",
-			ErrorMsg: fmt.Sprintf("provider %s not found", cfg.Provider),
+			ErrorMsg: fmt.Sprintf("provider not initialized for model %s", cfg.Name),
 		}
 	}
 
@@ -348,7 +361,7 @@ func (e *Engine) sendToModel(ctx context.Context, cfg *ModelConfig, req *RouteRe
 		Stream:   true,
 	}
 
-	stream, err := p.ChatCompletion(ctx, chatReq)
+	stream, err := cfg.ProviderInstance.ChatCompletion(ctx, chatReq)
 	if err != nil {
 		return &RouteResult{
 			Status:   "error",
@@ -377,10 +390,11 @@ func (e *Engine) isRateLimited(modelID string) bool {
 }
 
 // messagesToString concatenates all message contents into a single string.
+// Handles both string content and array (multi-modal) content by extracting text parts.
 func messagesToString(msgs []provider.Message) string {
 	var sb string
-	for _, m := range msgs {
-		sb += m.Content
+	for i := range msgs {
+		sb += msgs[i].ExtractText()
 	}
 	return sb
 }

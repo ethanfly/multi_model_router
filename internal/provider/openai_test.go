@@ -10,8 +10,8 @@ import (
 
 func TestOpenAIHealthCheck(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
-			t.Errorf("expected path /v1/chat/completions, got %s", r.URL.Path)
+		if r.URL.Path != "/chat/completions" {
+		t.Errorf("expected path /chat/completions, got %s", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("expected Authorization Bearer test-key, got %s", r.Header.Get("Authorization"))
@@ -22,7 +22,7 @@ func TestOpenAIHealthCheck(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenAI(server.URL, "test-key")
-	if err := p.HealthCheck(context.Background()); err != nil {
+	if err := p.HealthCheck(context.Background(), "gpt-4o-mini"); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 }
@@ -35,7 +35,7 @@ func TestOpenAIHealthCheckFailure(t *testing.T) {
 	defer server.Close()
 
 	p := NewOpenAI(server.URL, "test-key")
-	err := p.HealthCheck(context.Background())
+	err := p.HealthCheck(context.Background(), "gpt-4o-mini")
 	if err == nil {
 		t.Fatal("expected error for 401, got nil")
 	}
@@ -46,10 +46,10 @@ func TestOpenAIBaseURLNormalization(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"https://api.openai.com", "https://api.openai.com"},
-		{"https://api.openai.com/", "https://api.openai.com"},
-		{"https://api.openai.com/v1", "https://api.openai.com"},
-		{"https://api.openai.com/v1/", "https://api.openai.com"},
+		{"https://api.openai.com/v1", "https://api.openai.com/v1"},
+		{"https://api.openai.com/v1/", "https://api.openai.com/v1"},
+		{"https://ark.cn-beijing.volces.com/api/v3", "https://ark.cn-beijing.volces.com/api/v3"},
+		{"https://api.deepseek.com", "https://api.deepseek.com"},
 	}
 	for _, tc := range cases {
 		p := NewOpenAI(tc.input, "key")

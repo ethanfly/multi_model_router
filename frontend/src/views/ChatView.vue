@@ -71,13 +71,27 @@ async function sendMessage() {
   scrollToBottom()
 
   try {
-    await SendChat(core.ChatRequest.createFrom({
+    const resp = await SendChat(core.ChatRequest.createFrom({
       messages: messages.value
         .filter((m) => m.role === 'user' || (m.role === 'assistant' && m.content))
         .map((m) => ({ role: m.role, content: m.content })),
       mode: mode.value,
       modelId: mode.value === 'manual' ? selectedModel.value : '',
     }))
+    if (resp && resp.status === 'error') {
+      // Remove the empty assistant placeholder
+      const lastIdx = messages.value.length - 1
+      if (lastIdx >= 0 && messages.value[lastIdx].role === 'assistant' && !messages.value[lastIdx].content) {
+        messages.value.splice(lastIdx, 1)
+      }
+      messages.value.push({
+        role: 'error',
+        content: resp.error || 'Unknown error',
+        isError: true,
+      })
+      isStreaming.value = false
+      scrollToBottom()
+    }
   } catch (err: any) {
     messages.value.push({
       role: 'error',

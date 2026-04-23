@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -19,7 +20,6 @@ type AnthropicProvider struct {
 
 func NewAnthropic(baseURL, apiKey string) *AnthropicProvider {
 	baseURL = strings.TrimSuffix(baseURL, "/")
-	baseURL = strings.TrimSuffix(baseURL, "/v1")
 	return &AnthropicProvider{
 		BaseURL:    baseURL,
 		APIKey:     apiKey,
@@ -37,8 +37,8 @@ type anthropicRequest struct {
 }
 
 type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
 }
 
 type anthropicEvent struct {
@@ -63,7 +63,7 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 	var msgs []anthropicMessage
 	for _, m := range req.Messages {
 		if m.Role == "system" {
-			systemPrompt += m.Content + "\n"
+			systemPrompt += m.ExtractText() + "\n"
 		} else {
 			msgs = append(msgs, anthropicMessage{Role: m.Role, Content: m.Content})
 		}
@@ -88,7 +88,7 @@ func (p *AnthropicProvider) ChatCompletion(ctx context.Context, req *ChatRequest
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -119,6 +119,7 @@ func (p *AnthropicProvider) streamAnthropic(body io.ReadCloser, ch chan<- Stream
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var inputTokens int
+	var contentReceived bool
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -129,6 +130,7 @@ func (p *AnthropicProvider) streamAnthropic(body io.ReadCloser, ch chan<- Stream
 
 		var event anthropicEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			log.Printf("anthropic stream: failed to parse chunk: %v", err)
 			continue
 		}
 
@@ -146,6 +148,7 @@ func (p *AnthropicProvider) streamAnthropic(body io.ReadCloser, ch chan<- Stream
 					Content: event.Delta.Text,
 					Model:   model,
 				}
+				contentReceived = true
 			}
 		case "message_delta":
 			usage := &Usage{InputTokens: inputTokens}
@@ -161,6 +164,16 @@ func (p *AnthropicProvider) streamAnthropic(body io.ReadCloser, ch chan<- Stream
 			return
 		}
 	}
+
+	// Check for scanner errors (I/O error or token too long)
+	if err := scanner.Err(); err != nil {
+		ch <- StreamChunk{Error: fmt.Errorf("stream read error: %w", err), Done: true, Model: model}
+	} else {
+		// If we exited the loop without getting message_stop and no content was received, send error
+		if !contentReceived {
+			ch <- StreamChunk{Error: fmt.Errorf("stream ended without any content"), Done: true, Model: model}
+		}
+	}
 }
 
 func (p *AnthropicProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
@@ -171,15 +184,15 @@ func (p *AnthropicProvider) ListModels(ctx context.Context) ([]ModelInfo, error)
 	return models, nil
 }
 
-func (p *AnthropicProvider) HealthCheck(ctx context.Context) error {
+func (p *AnthropicProvider) HealthCheck(ctx context.Context, modelID string) error {
 	// Send a minimal request to verify credentials
 	body, _ := json.Marshal(anthropicRequest{
-		Model:     "claude-haiku-4-5-20251001",
+		Model:     modelID,
 		Messages:  []anthropicMessage{{Role: "user", Content: "hi"}},
 		MaxTokens: 1,
 	})
 
-	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/messages", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/messages", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

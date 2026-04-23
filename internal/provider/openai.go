@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -19,7 +20,6 @@ type OpenAIProvider struct {
 
 func NewOpenAI(baseURL, apiKey string) *OpenAIProvider {
 	baseURL = strings.TrimSuffix(baseURL, "/")
-	baseURL = strings.TrimSuffix(baseURL, "/v1")
 	return &OpenAIProvider{
 		BaseURL:    baseURL,
 		APIKey:     apiKey,
@@ -36,8 +36,8 @@ type openaiRequest struct {
 }
 
 type openaiMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
 }
 
 type openaiStreamResponse struct {
@@ -71,7 +71,7 @@ func (p *OpenAIProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -100,6 +100,8 @@ func (p *OpenAIProvider) streamOpenAI(body io.ReadCloser, ch chan<- StreamChunk,
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
+	var contentReceived bool
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -107,12 +109,17 @@ func (p *OpenAIProvider) streamOpenAI(body io.ReadCloser, ch chan<- StreamChunk,
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
-			ch <- StreamChunk{Done: true, Model: model}
+			if !contentReceived {
+				ch <- StreamChunk{Error: fmt.Errorf("no content received from upstream before [DONE]"), Done: true, Model: model}
+			} else {
+				ch <- StreamChunk{Done: true, Model: model}
+			}
 			return
 		}
 
 		var resp openaiStreamResponse
 		if err := json.Unmarshal([]byte(data), &resp); err != nil {
+			log.Printf("openai stream: failed to parse chunk: %v", err)
 			continue
 		}
 
@@ -130,13 +137,24 @@ func (p *OpenAIProvider) streamOpenAI(body io.ReadCloser, ch chan<- StreamChunk,
 					}
 				}
 				ch <- chunk
+				contentReceived = true
 			}
+		}
+	}
+
+	// Check for scanner errors (I/O error or token too long)
+	if err := scanner.Err(); err != nil {
+		ch <- StreamChunk{Error: fmt.Errorf("stream read error: %w", err), Done: true, Model: model}
+	} else {
+		// If we exited the loop without getting [DONE] and no content was received, send error
+		if !contentReceived {
+			ch <- StreamChunk{Error: fmt.Errorf("stream ended without any content"), Done: true, Model: model}
 		}
 	}
 }
 
 func (p *OpenAIProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", p.BaseURL+"/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", p.BaseURL+"/models", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -164,14 +182,14 @@ func (p *OpenAIProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	return models, nil
 }
 
-func (p *OpenAIProvider) HealthCheck(ctx context.Context) error {
+func (p *OpenAIProvider) HealthCheck(ctx context.Context, modelID string) error {
 	body, _ := json.Marshal(openaiRequest{
-		Model:    "gpt-4o-mini",
+		Model:    modelID,
 		Messages: []openaiMessage{{Role: "user", Content: "hi"}},
 		MaxTokens: 1,
 	})
 
-	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", p.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

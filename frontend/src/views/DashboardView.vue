@@ -1,6 +1,7 @@
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
-import { GetDashboardStats } from '../../wailsjs/go/main/App'
+import { ref, computed, onMounted } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { GetDashboardStats, GetDashboardLogs } from '../../wailsjs/go/main/App'
 
 interface ModelUsage {
   modelId: string
@@ -24,15 +25,24 @@ interface DashboardStats {
   avgLatency: number
   modelUsage: ModelUsage[]
   complexityDist: Record<string, number>
-  recentLogs: LogEntry[]
 }
+
+const { t } = useI18n()
 
 const stats = ref<DashboardStats | null>(null)
 const loading = ref(false)
 const error = ref('')
 
+// Pagination state
+const logs = ref<LogEntry[]>([])
+const logPage = ref(1)
+const logPageSize = 15
+const logTotal = ref(0)
+const logLoading = ref(false)
+const totalPages = computed(() => Math.max(1, Math.ceil(logTotal.value / logPageSize)))
+
 onMounted(async () => {
-  await loadStats()
+  await Promise.all([loadStats(), loadLogs()])
 })
 
 async function loadStats() {
@@ -44,19 +54,10 @@ async function loadStats() {
       stats.value = null
       return
     }
-    // Map Go response: snake_case map keys + json-tagged struct fields
     const mu: ModelUsage[] = (raw.model_usage || []).map((m: any) => ({
       modelId: m.modelId || '',
       count: m.count || 0,
       percentage: m.percentage || 0,
-    }))
-    const rl: LogEntry[] = (raw.recent_logs || []).map((l: any) => ({
-      time: l.createdAt ? new Date(l.createdAt).toLocaleString() : '',
-      model: l.modelId || '',
-      complexity: l.complexity || '',
-      source: l.source || '',
-      tokens: (l.tokensIn || 0) + (l.tokensOut || 0),
-      latency: l.latencyMs || 0,
     }))
     stats.value = {
       todayRequests: raw.total_requests || 0,
@@ -65,12 +66,44 @@ async function loadStats() {
       avgLatency: raw.avg_latency || 0,
       modelUsage: mu,
       complexityDist: raw.complexity_dist || {},
-      recentLogs: rl,
     }
   } catch (err: any) {
     error.value = err.message || 'Failed to load dashboard stats'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadLogs() {
+  logLoading.value = true
+  try {
+    const raw: any = await GetDashboardLogs(logPage.value, logPageSize)
+    logTotal.value = raw.total || 0
+    const mapped: LogEntry[] = (raw.logs || []).map((l: any) => ({
+      time: l.createdAt ? new Date(l.createdAt).toLocaleString() : '',
+      model: l.modelId || '',
+      complexity: l.complexity || '',
+      source: l.source || '',
+      tokens: (l.tokensIn || 0) + (l.tokensOut || 0),
+      latency: l.latencyMs || 0,
+    }))
+    logs.value = mapped
+  } catch { /* ignore */ } finally {
+    logLoading.value = false
+  }
+}
+
+function prevPage() {
+  if (logPage.value > 1) {
+    logPage.value--
+    loadLogs()
+  }
+}
+
+function nextPage() {
+  if (logPage.value < totalPages.value) {
+    logPage.value++
+    loadLogs()
   }
 }
 
@@ -160,9 +193,16 @@ function complexityColor(c: string): string {
       </div>
 
       <div class="logs-section">
-        <h3>{{ $t('dashboard.recentLogs') }}</h3>
+        <div class="logs-header">
+          <h3>{{ $t('dashboard.recentLogs') }}</h3>
+          <div v-if="logTotal > 0" class="pagination">
+            <button class="page-btn" :disabled="logPage <= 1 || logLoading" @click="prevPage">{{ $t('dashboard.prevPage') }}</button>
+            <span class="page-info">{{ logPage }} / {{ totalPages }}</span>
+            <button class="page-btn" :disabled="logPage >= totalPages || logLoading" @click="nextPage">{{ $t('dashboard.nextPage') }}</button>
+          </div>
+        </div>
         <div class="table-wrap">
-          <table v-if="stats.recentLogs && stats.recentLogs.length">
+          <table v-if="logs.length">
             <thead>
               <tr>
                 <th>{{ $t('dashboard.colTime') }}</th>
@@ -174,7 +214,7 @@ function complexityColor(c: string): string {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(log, i) in stats.recentLogs" :key="i">
+              <tr v-for="(log, i) in logs" :key="i">
                 <td>{{ log.time }}</td>
                 <td>{{ log.model }}</td>
                 <td>
@@ -413,10 +453,53 @@ function complexityColor(c: string): string {
 }
 
 .logs-section h3 {
-  margin: 0 0 16px 0;
+  margin: 0;
   font-size: 15px;
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+.logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.page-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.page-btn:hover:not(:disabled) {
+  background: var(--surface-light);
+  color: var(--text);
+  border-color: var(--primary);
+}
+
+.page-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.page-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 60px;
+  text-align: center;
 }
 
 .table-wrap {

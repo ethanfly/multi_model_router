@@ -39,7 +39,7 @@ MultiModelRouter.exe --help
 MultiModelRouter.exe version
 
 # Headless 代理模式（无 GUI，适合服务器）
-MultiModelRouter.exe serve --port 9680
+MultiModelRouter.exe serve --port 9680 --mode auto --api-key sk-your-key
 
 # TUI 交互模式（终端管理界面）
 MultiModelRouter.exe tui
@@ -49,7 +49,7 @@ MultiModelRouter.exe tui
 
 | 命令 | 说明 | 参数 |
 |------|------|------|
-| `serve` | 启动无头代理服务器 | `-p, --port` 代理端口（默认 9680） |
+| `serve` | 启动无头代理服务器 | `-p, --port` 代理端口（默认 9680）<br>`-m, --mode` 路由模式：auto/manual/race<br>`-k, --api-key` 代理 API 密钥 |
 | `tui` | 启动终端管理界面 | `-p, --port` 默认代理端口 |
 | `version` | 显示版本号 | — |
 
@@ -71,18 +71,50 @@ MultiModelRouter.exe tui
 http://localhost:9680/v1
 ```
 
-### cURL 测试
+### API 密钥认证
+
+在设置页面配置代理 API 密钥后，请求必须携带密钥：
 
 ```bash
+# 方式一：Authorization Bearer
 curl http://localhost:9680/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer any" \
+  -H "Authorization: Bearer YOUR_PROXY_KEY" \
   -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
+
+# 方式二：x-api-key 头
+curl http://localhost:9680/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: YOUR_PROXY_KEY" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+不配置密钥则不校验（适合本地开发）。
+
+### 模型路由
+
+通过 `model` 字段控制路由行为：
+
+| model 值 | 行为 |
+|----------|------|
+| `"auto"` 或空 | 使用默认路由模式（设置页配置） |
+| `"race"` | 强制竞速模式 |
+| 具体模型名（如 `"Kimi-K2.6"`） | 手动模式，路由到指定模型 |
+
+```bash
+# 自动路由
+curl ... -d '{"model":"auto","messages":[...]}'
+
+# 指定模型
+curl ... -d '{"model":"Kimi-K2.6","messages":[...]}'
+
+# 竞速模式
+curl ... -d '{"model":"race","messages":[...]}'
 ```
 
 路由模式：
 - `auto` — 自动根据复杂度选择模型
-- `manual` — 需指定模型 ID
+- `manual` — 需指定模型名称
 - `race` — 多模型竞争，最快响应胜出
 
 ## 开发

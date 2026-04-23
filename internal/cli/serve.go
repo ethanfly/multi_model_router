@@ -14,6 +14,8 @@ import (
 
 func newServeCmd() *cobra.Command {
 	var port int
+	var mode string
+	var apiKey string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -26,6 +28,20 @@ func newServeCmd() *cobra.Command {
 				return fmt.Errorf("init: %w", err)
 			}
 			defer c.Close()
+
+			// Persist mode if provided via flag
+			if mode != "" {
+				if err := c.SetProxyMode(mode); err != nil {
+					return fmt.Errorf("set mode: %w", err)
+				}
+			}
+
+			// Persist API key if provided via flag
+			if apiKey != "" {
+				if err := c.SetConfig("proxy_api_key", apiKey); err != nil {
+					return fmt.Errorf("set api key: %w", err)
+				}
+			}
 
 			// Determine port: flag > DB config > default
 			servePort := port
@@ -42,7 +58,15 @@ func newServeCmd() *cobra.Command {
 				return fmt.Errorf("start proxy: %w", err)
 			}
 
-			fmt.Printf("Multi-Model Router proxy listening on :%d\n", servePort)
+			currentMode := c.GetProxyMode()
+			currentKey := c.GetConfig("proxy_api_key")
+			fmt.Printf("Multi-Model Router proxy listening on :%d (mode: %s)\n", servePort, currentMode)
+			if currentKey != "" {
+				fmt.Println("API key authentication: enabled")
+			} else {
+				fmt.Println("API key authentication: disabled")
+			}
+			fmt.Println("Use model=\"auto\" for auto routing, or pass a model name for manual selection.")
 			fmt.Println("Press Ctrl+C to stop.")
 
 			// Block until signal
@@ -55,5 +79,7 @@ func newServeCmd() *cobra.Command {
 	}
 
 	cmd.Flags().IntVarP(&port, "port", "p", 0, "Proxy port (default: 9680)")
+	cmd.Flags().StringVarP(&mode, "mode", "m", "", "Proxy mode: auto, manual, race (default: auto)")
+	cmd.Flags().StringVarP(&apiKey, "api-key", "k", "", "API key for proxy authentication")
 	return cmd
 }

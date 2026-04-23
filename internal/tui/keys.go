@@ -10,6 +10,7 @@ var keys = struct {
 	Down    string
 	Toggle  string
 	Reload  string
+	Mode    string
 	Delete  string
 	Test    string
 	Enter   string
@@ -22,6 +23,7 @@ var keys = struct {
 	Down:   "down",
 	Toggle: "s",
 	Reload: "r",
+	Mode:   "m",
 	Delete: "d",
 	Test:   "t",
 	Enter:  "enter",
@@ -31,6 +33,7 @@ var keys = struct {
 func HelpText() string {
 	return keyStyle.Render("[1/2/3]") + " tabs  " +
 		keyStyle.Render("[s]") + " proxy  " +
+		keyStyle.Render("[m]") + " mode  " +
 		keyStyle.Render("[r]") + " reload  " +
 		keyStyle.Render("[q]") + " quit"
 }

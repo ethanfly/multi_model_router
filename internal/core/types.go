@@ -46,4 +46,5 @@ type ChatResponse struct {
 type ProxyStatus struct {
 	Running bool
 	Port    int
+	Mode    string
 }

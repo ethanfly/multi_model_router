@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"multi_model_router/internal/proxy"
+	"multi_model_router/internal/router"
 )
 
 // StartProxy starts the proxy server on the given port.
@@ -17,7 +18,13 @@ func (c *Core) StartProxy(port int) error {
 		c.proxy = nil
 	}
 
-	c.proxy = proxy.New(port, c.engine)
+	modeStr := c.getProxyModeLocked()
+	routeMode := router.RouteModeFromString(modeStr)
+	proxyAPIKey := ""
+	if c.db != nil {
+		proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+	}
+	c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
 	if err := c.proxy.Start(); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
 	}
@@ -51,8 +58,56 @@ func (c *Core) GetProxyStatus() ProxyStatus {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	mode := c.getProxyModeLocked()
 	if c.proxy != nil {
-		return ProxyStatus{Running: true, Port: c.proxy.Port()}
+		return ProxyStatus{Running: true, Port: c.proxy.Port(), Mode: mode}
 	}
-	return ProxyStatus{Running: false, Port: 0}
+	return ProxyStatus{Running: false, Port: 0, Mode: mode}
+}
+
+// GetProxyMode returns the persisted proxy route mode (default "auto").
+func (c *Core) GetProxyMode() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.getProxyModeLocked()
+}
+
+func (c *Core) getProxyModeLocked() string {
+	if c.db == nil {
+		return "auto"
+	}
+	val, err := c.db.GetConfig("proxy_mode")
+	if err != nil || val == "" {
+		return "auto"
+	}
+	return val
+}
+
+// SetProxyMode persists the proxy route mode and updates the running proxy if active.
+func (c *Core) SetProxyMode(mode string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db != nil {
+		if err := c.db.SetConfig("proxy_mode", mode); err != nil {
+			return err
+		}
+	}
+
+	// If proxy is running, restart it with the new mode
+	if c.proxy != nil {
+		port := c.proxy.Port()
+		c.proxy.Stop()
+		routeMode := router.RouteModeFromString(mode)
+		proxyAPIKey := ""
+		if c.db != nil {
+			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+		}
+		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		if err := c.proxy.Start(); err != nil {
+			return fmt.Errorf("restart proxy with new mode: %w", err)
+		}
+	}
+
+	return nil
 }

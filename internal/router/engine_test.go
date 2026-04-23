@@ -8,7 +8,7 @@ import (
 )
 
 func TestSelectModel_SimplePrefersSpeed(t *testing.T) {
-	e := NewEngine(NewClassifier(nil))
+	e := NewEngine(NewClassifier(nil, nil))
 
 	fastModel := &ModelConfig{
 		ID:            "fast",
@@ -48,7 +48,7 @@ func TestSelectModel_SimplePrefersSpeed(t *testing.T) {
 }
 
 func TestSelectModel_ComplexPrefersReasoning(t *testing.T) {
-	e := NewEngine(NewClassifier(nil))
+	e := NewEngine(NewClassifier(nil, nil))
 
 	fastModel := &ModelConfig{
 		ID:            "fast",
@@ -88,7 +88,7 @@ func TestSelectModel_ComplexPrefersReasoning(t *testing.T) {
 }
 
 func TestSelectModel_SkipsInactive(t *testing.T) {
-	e := NewEngine(NewClassifier(nil))
+	e := NewEngine(NewClassifier(nil, nil))
 
 	inactiveModel := &ModelConfig{
 		ID:            "inactive",
@@ -136,25 +136,25 @@ func (m *mockProvider) ListModels(ctx context.Context) ([]provider.ModelInfo, er
 	return []provider.ModelInfo{}, nil
 }
 
-func (m *mockProvider) HealthCheck(ctx context.Context) error {
+func (m *mockProvider) HealthCheck(ctx context.Context, modelID string) error {
 	return nil
 }
 
 func TestRouteAuto_Integration(t *testing.T) {
-	e := NewEngine(NewClassifier(nil))
-	e.AddProvider("test", &mockProvider{})
+	e := NewEngine(NewClassifier(nil, nil))
 
 	model := &ModelConfig{
-		ID:            "test-model",
-		Name:          "Test Model",
-		Provider:      "test",
-		ModelID:       "test-v1",
-		Reasoning:     7,
-		Coding:        7,
-		Creativity:    7,
-		Speed:         7,
-		CostEfficiency: 7,
-		IsActive:      true,
+		ID:              "test-model",
+		Name:            "Test Model",
+		Provider:        "test",
+		ModelID:         "test-v1",
+		Reasoning:       7,
+		Coding:          7,
+		Creativity:      7,
+		Speed:           7,
+		CostEfficiency:  7,
+		IsActive:        true,
+		ProviderInstance: &mockProvider{},
 	}
 	e.SetModels([]*ModelConfig{model})
 

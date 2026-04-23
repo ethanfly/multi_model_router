@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"multi_model_router/internal/provider"
@@ -20,16 +21,20 @@ type Router interface {
 // Server is a local HTTP proxy that accepts OpenAI-compatible requests
 // and routes them through the router engine.
 type Server struct {
-	port   int
-	router Router
-	server *http.Server
+	port        int
+	router      Router
+	server      *http.Server
+	defaultMode router.RouteMode
+	apiKey      string
 }
 
-// New creates a new proxy Server listening on the given port.
-func New(port int, r Router) *Server {
+// New creates a new proxy Server listening on the given port with a default route mode.
+func New(port int, r Router, mode router.RouteMode, apiKey string) *Server {
 	return &Server{
-		port:   port,
-		router: r,
+		port:        port,
+		router:      r,
+		defaultMode: mode,
+		apiKey:      apiKey,
 	}
 }
 
@@ -76,6 +81,25 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// API key authentication
+	if s.apiKey != "" {
+		authHeader := r.Header.Get("Authorization")
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if token == "" || token == authHeader {
+			// No Bearer token — also check x-api-key header
+			token = r.Header.Get("x-api-key")
+		}
+		if token != s.apiKey {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"error": map[string]string{
+					"message": "invalid or missing API key",
+					"type":    "authentication_error",
+				},
+			})
+			return
+		}
+	}
+
 	body, err := provider.ReadBody(r.Body, 1<<20) // 1MB limit
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
@@ -85,8 +109,8 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model    string `json:"model"`
 		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role    string      `json:"role"`
+			Content interface{} `json:"content"`
 		} `json:"messages"`
 		Stream bool `json:"stream"`
 	}
@@ -101,16 +125,31 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		msgs[i] = provider.Message{Role: m.Role, Content: m.Content}
 	}
 
-	// Determine route mode from header.
-	mode := router.RouteAuto
-	if r.Header.Get("X-Router-Mode") == "race" {
+	// Determine route mode based on model field:
+	// - "auto" or empty → use default mode
+	// - specific model name → manual mode (route to that model)
+	mode := s.defaultMode
+	modelID := ""
+	switch {
+	case req.Model == "" || req.Model == "auto":
+		// Use default mode
+	case req.Model == "race":
 		mode = router.RouteRace
+	default:
+		// Specific model name → manual mode
+		mode = router.RouteManual
+		modelID = req.Model
+	}
+
+	// Header override still takes priority
+	if h := r.Header.Get("X-Router-Mode"); h != "" {
+		mode = router.RouteModeFromString(h)
 	}
 
 	routeReq := &router.RouteRequest{
 		Messages: msgs,
 		Mode:     mode,
-		ModelID:  req.Model,
+		ModelID:  modelID,
 	}
 
 	result := s.router.Route(r.Context(), routeReq)
@@ -134,9 +173,26 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 
 	flusher, canFlush := w.(http.Flusher)
 
+	var hasSentContent bool
+	var gotError bool
+
 	for chunk := range result.Stream {
 		if chunk.Error != nil {
 			log.Printf("stream error: %v", chunk.Error)
+			// Send error as SSE to client
+			errResp := map[string]interface{}{
+				"error": map[string]string{
+					"message": chunk.Error.Error(),
+					"type":    "stream_error",
+				},
+			}
+			if b, err := json.Marshal(errResp); err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+			gotError = true
 			break
 		}
 
@@ -150,8 +206,28 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			},
 			"model": chunk.Model,
 		}
-		b, _ := json.Marshal(data)
+		b, err := json.Marshal(data)
+		if err != nil {
+			log.Printf("json marshaling error on response chunk: %v", err)
+			// Send error to client
+			errResp := map[string]interface{}{
+				"error": map[string]string{
+					"message": fmt.Sprintf("internal error: failed to encode response: %v", err),
+					"type":    "encoding_error",
+				},
+			}
+			if bErr, errMarshal := json.Marshal(errResp); errMarshal == nil {
+				fmt.Fprintf(w, "data: %s\n\n", bErr)
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+			gotError = true
+			break
+		}
+
 		fmt.Fprintf(w, "data: %s\n\n", b)
+		hasSentContent = true
 
 		if canFlush {
 			flusher.Flush()
@@ -162,9 +238,27 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	if canFlush {
-		flusher.Flush()
+	if !gotError {
+		// If no error and no content was received, send an explicit error
+		if !hasSentContent {
+			errResp := map[string]interface{}{
+				"error": map[string]string{
+					"message": "no content was received from the model",
+					"type":    "empty_response",
+				},
+			}
+			if b, err := json.Marshal(errResp); err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", b)
+				if canFlush {
+					flusher.Flush()
+				}
+			}
+		}
+		// Always send [DONE] in OpenAI protocol when no error
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		if canFlush {
+			flusher.Flush()
+		}
 	}
 }
 

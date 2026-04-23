@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"multi_model_router/internal/crypto"
+	"multi_model_router/internal/proxy"
 	"multi_model_router/internal/provider"
 	"multi_model_router/internal/router"
 	"multi_model_router/internal/stats"
@@ -53,7 +55,7 @@ func (c *Core) loadModels() {
 			m.APIKey = decrypted
 		}
 
-		c.ensureProvider(m.Provider, m.BaseURL, m.APIKey)
+		c.setProviderInstance(&m)
 		models = append(models, &m)
 	}
 
@@ -68,13 +70,13 @@ func (c *Core) ReloadModels() {
 	c.loadModels()
 }
 
-// ensureProvider creates and registers a provider if it doesn't already exist.
-func (c *Core) ensureProvider(providerName, baseURL, apiKey string) {
-	switch providerName {
+// setProviderInstance creates and assigns a provider instance to the model.
+func (c *Core) setProviderInstance(m *router.ModelConfig) {
+	switch m.Provider {
 	case "openai":
-		c.engine.AddProvider(providerName, provider.NewOpenAI(baseURL, apiKey))
+		m.ProviderInstance = provider.NewOpenAI(m.BaseURL, m.APIKey)
 	case "anthropic":
-		c.engine.AddProvider(providerName, provider.NewAnthropic(baseURL, apiKey))
+		m.ProviderInstance = provider.NewAnthropic(m.BaseURL, m.APIKey)
 	}
 }
 
@@ -120,6 +122,7 @@ func (c *Core) GetModels() []ModelJSON {
 }
 
 // SaveModel inserts or updates a model and reloads the engine.
+// If proxy is running, restart it to pick up the new configuration.
 func (c *Core) SaveModel(m ModelJSON) error {
 	if c.db == nil {
 		return fmt.Errorf("database not initialized")
@@ -130,9 +133,20 @@ func (c *Core) SaveModel(m ModelJSON) error {
 		m.ID = router.NewUUID()
 	}
 
-	// Encrypt the API key before storing
+	// Determine the API key to store
 	encryptedKey := m.APIKey
-	if m.APIKey != "" && !(len(m.APIKey) > 8 && m.APIKey[4:7] == "...") {
+	if m.APIKey == "" {
+		// Empty key — clear it
+		encryptedKey = ""
+	} else if len(m.APIKey) > 8 && m.APIKey[4:7] == "..." {
+		// Masked key (user didn't change it) — preserve existing encrypted key from DB
+		var existingKey string
+		err := c.db.QueryRow("SELECT api_key FROM models WHERE id = ?", m.ID).Scan(&existingKey)
+		if err == nil && existingKey != "" {
+			encryptedKey = existingKey
+		}
+	} else {
+		// New key — encrypt it
 		enc, err := crypto.Encrypt(m.APIKey)
 		if err != nil {
 			return fmt.Errorf("encrypt api key: %w", err)
@@ -160,10 +174,30 @@ func (c *Core) SaveModel(m ModelJSON) error {
 	}
 
 	c.ReloadModels()
+
+	// If proxy is running, restart it to pick up the new configuration
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.proxy != nil {
+		port := c.proxy.Port()
+		c.proxy.Stop()
+		modeStr := c.getProxyModeLocked()
+		routeMode := router.RouteModeFromString(modeStr)
+		proxyAPIKey := ""
+		if c.db != nil {
+			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+		}
+		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		if err := c.proxy.Start(); err != nil {
+			log.Printf("failed to restart proxy after model save: %v", err)
+		}
+	}
+
 	return nil
 }
 
 // DeleteModel removes a model and reloads the engine.
+// If proxy is running, restart it to pick up the new configuration.
 func (c *Core) DeleteModel(id string) error {
 	if c.db == nil {
 		return fmt.Errorf("database not initialized")
@@ -175,17 +209,48 @@ func (c *Core) DeleteModel(id string) error {
 	}
 
 	c.ReloadModels()
+
+	// If proxy is running, restart it to pick up the new configuration
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.proxy != nil {
+		port := c.proxy.Port()
+		c.proxy.Stop()
+		modeStr := c.getProxyModeLocked()
+		routeMode := router.RouteModeFromString(modeStr)
+		proxyAPIKey := ""
+		if c.db != nil {
+			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+		}
+		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		if err := c.proxy.Start(); err != nil {
+			log.Printf("failed to restart proxy after model delete: %v", err)
+		}
+	}
+
 	return nil
 }
 
 // TestModel creates a temporary provider and checks its health.
 func (c *Core) TestModel(ctx context.Context, m ModelJSON) (string, error) {
+	// Read the real encrypted API key from DB and decrypt — the key from
+	// GetModels() is masked (e.g. "sk-a...bcd") and won't work for API calls.
+	apiKey := m.APIKey
+	if c.db != nil && m.ID != "" {
+		var encKey string
+		if err := c.db.QueryRow("SELECT api_key FROM models WHERE id = ?", m.ID).Scan(&encKey); err == nil && encKey != "" {
+			if dec, err := crypto.Decrypt(encKey); err == nil {
+				apiKey = dec
+			}
+		}
+	}
+
 	var p provider.Provider
 	switch m.Provider {
 	case "openai":
-		p = provider.NewOpenAI(m.BaseURL, m.APIKey)
+		p = provider.NewOpenAI(m.BaseURL, apiKey)
 	case "anthropic":
-		p = provider.NewAnthropic(m.BaseURL, m.APIKey)
+		p = provider.NewAnthropic(m.BaseURL, apiKey)
 	default:
 		return "FAIL: unknown provider " + m.Provider, nil
 	}
@@ -193,7 +258,7 @@ func (c *Core) TestModel(ctx context.Context, m ModelJSON) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	if err := p.HealthCheck(ctx); err != nil {
+	if err := p.HealthCheck(ctx, m.ModelID); err != nil {
 		return "FAIL: " + err.Error(), nil
 	}
 	return "OK", nil

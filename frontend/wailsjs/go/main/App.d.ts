@@ -4,13 +4,21 @@ import {core} from '../models';
 
 export function DeleteModel(arg1:string):Promise<void>;
 
+export function GetActiveModels():Promise<string>;
+
 export function GetAutoStart():Promise<boolean>;
 
+export function GetClassifierConfig():Promise<string>;
+
 export function GetConfig(arg1:string):Promise<string>;
+
+export function GetDashboardLogs(arg1:number,arg2:number):Promise<Record<string, any>>;
 
 export function GetDashboardStats():Promise<Record<string, any>>;
 
 export function GetModels():Promise<Array<core.ModelJSON>>;
+
+export function GetProxyMode():Promise<string>;
 
 export function GetProxyStatus():Promise<Record<string, any>>;
 
@@ -28,7 +36,11 @@ export function SendChat(arg1:core.ChatRequest):Promise<core.ChatResponse>;
 
 export function SetAutoStart(arg1:boolean):Promise<string>;
 
+export function SetClassifierConfig(arg1:string):Promise<string>;
+
 export function SetConfig(arg1:string,arg2:string):Promise<string>;
+
+export function SetProxyMode(arg1:string):Promise<string>;
 
 export function StartProxy(arg1:number):Promise<string>;
 

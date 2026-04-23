@@ -6,8 +6,30 @@ import (
 )
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+// ExtractText extracts all text content from a message, handling both string and array (multi-modal) formats.
+func (m *Message) ExtractText() string {
+	switch content := m.Content.(type) {
+	case string:
+		return content
+	case []interface{}:
+		var text string
+		for _, part := range content {
+			if partMap, ok := part.(map[string]interface{}); ok {
+				if t, ok := partMap["type"].(string); ok && t == "text" {
+					if txt, ok := partMap["text"].(string); ok {
+						text += txt + " "
+					}
+				}
+			}
+		}
+		return text
+	default:
+		return ""
+	}
 }
 
 type ChatRequest struct {
@@ -40,7 +62,7 @@ type ModelInfo struct {
 type Provider interface {
 	ChatCompletion(ctx context.Context, req *ChatRequest) (<-chan StreamChunk, error)
 	ListModels(ctx context.Context) ([]ModelInfo, error)
-	HealthCheck(ctx context.Context) error
+	HealthCheck(ctx context.Context, modelID string) error
 }
 
 func CollectStream(ch <-chan StreamChunk) (string, *Usage, error) {

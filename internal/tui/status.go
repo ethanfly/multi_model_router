@@ -18,6 +18,7 @@ type statusTab struct {
 	core       *core.Core
 	running    bool
 	port       int
+	mode       string
 	numModels  int
 	requests   int
 	tokensIn   int
@@ -45,6 +46,7 @@ func refreshStatus(c *core.Core) tea.Cmd {
 				core:       c,
 				running:    ps.Running,
 				port:       ps.Port,
+				mode:       ps.Mode,
 				numModels:  len(models),
 				requests:   reqs,
 				tokensIn:   tIn,
@@ -73,10 +75,15 @@ func (t statusTab) View(width int) string {
 	b.WriteString(fmt.Sprintf("%s %s\n\n", statusDot, statusText))
 
 	// Key metrics
+	modeStr := t.mode
+	if modeStr == "" {
+		modeStr = "auto"
+	}
 	rows := []struct {
 		label string
 		value string
 	}{
+		{"Mode", modeStr},
 		{"Models", fmt.Sprintf("%d", t.numModels)},
 		{"Today Requests", fmt.Sprintf("%d", t.requests)},
 		{"Tokens In", fmt.Sprintf("%d", t.tokensIn)},
@@ -92,8 +99,9 @@ func (t statusTab) View(width int) string {
 	}
 
 	// Action hint
-	b.WriteString(fmt.Sprintf("\n  %s start/stop proxy  %s reload models",
+	b.WriteString(fmt.Sprintf("\n  %s start/stop proxy  %s cycle mode  %s reload models",
 		keyStyle.Render("[s]"),
+		keyStyle.Render("[m]"),
 		keyStyle.Render("[r]"),
 	))
 

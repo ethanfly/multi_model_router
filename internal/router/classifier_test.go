@@ -6,7 +6,7 @@ import (
 )
 
 func TestClassifyByRules_SimpleTranslation(t *testing.T) {
-	c := NewClassifier(nil)
+	c := NewClassifier(nil, nil)
 	result := c.classifyByRules("翻译这段话")
 	if result.Complexity != Simple {
 		t.Errorf("expected Simple, got %v", result.Complexity)
@@ -14,7 +14,7 @@ func TestClassifyByRules_SimpleTranslation(t *testing.T) {
 }
 
 func TestClassifyByRules_SimpleShort(t *testing.T) {
-	c := NewClassifier(nil)
+	c := NewClassifier(nil, nil)
 	result := c.classifyByRules("What is Python?")
 	if result.Complexity != Simple {
 		t.Errorf("expected Simple, got %v", result.Complexity)
@@ -22,7 +22,7 @@ func TestClassifyByRules_SimpleShort(t *testing.T) {
 }
 
 func TestClassifyByRules_ComplexArchitecture(t *testing.T) {
-	c := NewClassifier(nil)
+	c := NewClassifier(nil, nil)
 	question := "请帮我设计一个高并发的微服务架构系统，需要考虑服务发现、负载均衡、熔断降级、分布式追踪等多个方面，并且需要支持千万级用户同时在线，请问应该如何设计和优化整个系统的架构？"
 	result := c.classifyByRules(question)
 	if result.Complexity != Complex {
@@ -31,7 +31,7 @@ func TestClassifyByRules_ComplexArchitecture(t *testing.T) {
 }
 
 func TestClassifyByRules_ComplexWithCode(t *testing.T) {
-	c := NewClassifier(nil)
+	c := NewClassifier(nil, nil)
 	question := "请帮我优化架构设计，以下是代码：```go\nfunc main() {}\n``` 和 ```python\ndef hello(): pass\n```"
 	result := c.classifyByRules(question)
 	if result.Complexity != Complex {
@@ -40,7 +40,7 @@ func TestClassifyByRules_ComplexWithCode(t *testing.T) {
 }
 
 func TestClassifyByRules_Medium(t *testing.T) {
-	c := NewClassifier(nil)
+	c := NewClassifier(nil, nil)
 	question := "分析一下这段代码的性能瓶颈在哪里"
 	result := c.classifyByRules(question)
 	if result.Complexity == Simple {
@@ -49,7 +49,7 @@ func TestClassifyByRules_Medium(t *testing.T) {
 }
 
 func TestClassifyHybrid_UncertainFallsBack(t *testing.T) {
-	c := NewClassifier(nil) // nil analyzer
+	c := NewClassifier(nil, nil) // nil analyzer
 	// Use a question that should yield Uncertain from rules
 	question := "帮我看看这个"
 	result, err := c.Classify(context.Background(), question)
@@ -64,7 +64,7 @@ func TestClassifyHybrid_UncertainFallsBack(t *testing.T) {
 
 func TestClassifyHybrid_ModelOverride(t *testing.T) {
 	mock := &mockAnalyzer{result: Complex}
-	c := NewClassifier(mock)
+	c := NewClassifier(nil, mock)
 	// Use a short question that might not trigger high confidence in rules
 	question := "帮我看看这个"
 	result, err := c.Classify(context.Background(), question)

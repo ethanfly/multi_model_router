@@ -5,15 +5,25 @@ import (
 	"fmt"
 	"image/png"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
+// MenuItem represents a single tray menu entry.
+type MenuItem struct {
+	ID      string
+	Label   string
+	Checked bool
+	Sep     bool // separator line
+	Handler func()
+}
+
 var (
-	user32  = windows.NewLazyDLL("user32.dll")
-	gdi32   = windows.NewLazyDLL("gdi32.dll")
+	user32   = windows.NewLazyDLL("user32.dll")
+	gdi32    = windows.NewLazyDLL("gdi32.dll")
 	shell32  = windows.NewLazyDLL("shell32.dll")
 	kernel32 = windows.NewLazyDLL("kernel32.dll")
 
@@ -62,12 +72,14 @@ const (
 
 	MF_STRING    = 0x00000000
 	MF_SEPARATOR = 0x00000800
+	MF_CHECKED   = 0x00000008
+	MF_GRAYED    = 0x00000001
 
 	TPM_BOTTOMALIGN = 0x0020
 	TPM_LEFTALIGN   = 0x0000
 
-	ID_SHOW = 1
-	ID_QUIT = 2
+	// Base for dynamic command IDs
+	cmdIDBase = 1000
 )
 
 type (
@@ -144,33 +156,47 @@ var (
 	wndProcPtr = syscall.NewCallback(trayWndProc)
 	inst       windows.Handle
 
-	onShowFn func()
-	onQuitFn func()
+	mu       sync.Mutex
+	menuItems []MenuItem
+	cmdMap   map[uintptr]func() // cmdID -> handler
 )
+
+// FNV-1a hash for menu item IDs
+func fnvHash(s string) uint32 {
+	h := uint32(2166136261)
+	for _, b := range []byte(s) {
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	return h
+}
+
+func menuItemCmdID(id string) uintptr {
+	return uintptr(cmdIDBase + fnvHash(id)%60000)
+}
 
 func trayWndProc(hwnd windows.HWND, umsg uint32, wparam uintptr, lparam uintptr) uintptr {
 	switch umsg {
 	case WM_TRAYICON:
 		switch lparam {
 		case WM_LBUTTONUP:
-			if onShowFn != nil {
-				onShowFn()
+			mu.Lock()
+			for _, item := range menuItems {
+				if item.ID == "show" && item.Handler != nil {
+					item.Handler()
+					break
+				}
 			}
+			mu.Unlock()
 		case WM_RBUTTONUP:
 			popupMenu(hwnd)
 		}
 	case WM_COMMAND:
-		switch wparam {
-		case ID_SHOW:
-			if onShowFn != nil {
-				onShowFn()
-			}
-		case ID_QUIT:
-			removeIcon()
-			if onQuitFn != nil {
-				onQuitFn()
-			}
-			procPostQuitMessage.Call(0)
+		mu.Lock()
+		handler := cmdMap[wparam]
+		mu.Unlock()
+		if handler != nil {
+			handler()
 		}
 	case WM_DESTROY:
 		removeIcon()
@@ -182,11 +208,25 @@ func trayWndProc(hwnd windows.HWND, umsg uint32, wparam uintptr, lparam uintptr)
 
 func popupMenu(hwnd windows.HWND) {
 	hMenu, _, _ := procCreatePopupMenu.Call()
-	show := windows.StringToUTF16Ptr("Show")
-	quit := windows.StringToUTF16Ptr("Quit")
-	procAppendMenuW.Call(uintptr(hMenu), MF_STRING, ID_SHOW, uintptr(unsafe.Pointer(show)))
-	procAppendMenuW.Call(uintptr(hMenu), MF_SEPARATOR, 0, 0)
-	procAppendMenuW.Call(uintptr(hMenu), MF_STRING, ID_QUIT, uintptr(unsafe.Pointer(quit)))
+
+	mu.Lock()
+	items := make([]MenuItem, len(menuItems))
+	copy(items, menuItems)
+	mu.Unlock()
+
+	for _, item := range items {
+		if item.Sep {
+			procAppendMenuW.Call(uintptr(hMenu), MF_SEPARATOR, 0, 0)
+			continue
+		}
+		label := windows.StringToUTF16Ptr(item.Label)
+		cmdID := menuItemCmdID(item.ID)
+		flags := MF_STRING
+		if item.Checked {
+			flags |= MF_CHECKED
+		}
+		procAppendMenuW.Call(uintptr(hMenu), uintptr(flags), cmdID, uintptr(unsafe.Pointer(label)))
+	}
 
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
@@ -278,8 +318,19 @@ func pngToIcon(pngData []byte) (windows.Handle, error) {
 func Run(tooltip string, iconPNG []byte, onShow, onQuit func()) {
 	runtime.LockOSThread()
 
-	onShowFn = onShow
-	onQuitFn = onQuit
+	// Set default show/quit handlers
+	mu.Lock()
+	menuItems = []MenuItem{
+		{ID: "show", Label: "Show", Handler: onShow},
+		{ID: "sep1", Sep: true},
+		{ID: "quit", Label: "Quit", Handler: func() {
+			removeIcon()
+			onQuit()
+			procPostQuitMessage.Call(0)
+		}},
+	}
+	rebuildCmdMap()
+	mu.Unlock()
 
 	h, _, _ := procGetModuleHandleW.Call(0)
 	inst = windows.Handle(h)
@@ -343,6 +394,25 @@ func Run(tooltip string, iconPNG []byte, onShow, onQuit func()) {
 		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
+}
+
+// UpdateMenu replaces the tray menu items. Thread-safe.
+func UpdateMenu(items []MenuItem) {
+	mu.Lock()
+	defer mu.Unlock()
+	menuItems = make([]MenuItem, len(items))
+	copy(menuItems, items)
+	rebuildCmdMap()
+}
+
+func rebuildCmdMap() {
+	cmdMap = make(map[uintptr]func(), len(menuItems))
+	for _, item := range menuItems {
+		if item.Sep || item.Handler == nil {
+			continue
+		}
+		cmdMap[menuItemCmdID(item.ID)] = item.Handler
 	}
 }
 

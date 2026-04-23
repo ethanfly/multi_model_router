@@ -54,6 +54,12 @@ func (a *App) startup(ctx context.Context) {
 		func() { a.QuitApp() },
 	)
 
+	// Build initial tray menu after a short delay (let tray init first)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		a.refreshTrayMenu()
+	}()
+
 	// Auto-start proxy if enabled
 	if val, _ := a.core.DB().GetConfig("proxy_enabled"); val == "true" {
 		port := a.core.Config().ProxyPort
@@ -264,11 +270,16 @@ func (a *App) GetDashboardStats() map[string]any {
 	return a.core.GetDashboardStats()
 }
 
+func (a *App) GetDashboardLogs(page, pageSize int) map[string]any {
+	return a.core.GetDashboardLogs(page, pageSize)
+}
+
 func (a *App) GetProxyStatus() map[string]any {
 	s := a.core.GetProxyStatus()
 	return map[string]any{
 		"running": s.Running,
 		"port":    s.Port,
+		"mode":    s.Mode,
 	}
 }
 
@@ -284,6 +295,42 @@ func (a *App) StopProxy() string {
 	return "OK"
 }
 
+func (a *App) GetProxyMode() string {
+	return a.core.GetProxyMode()
+}
+
+func (a *App) SetProxyMode(mode string) string {
+	if err := a.core.SetProxyMode(mode); err != nil {
+		return "error: " + err.Error()
+	}
+	go a.refreshTrayMenu()
+	return "OK"
+}
+
+func (a *App) GetClassifierConfig() string {
+	cfg := a.core.GetClassifierConfig()
+	return cfg.ToJSON()
+}
+
+func (a *App) SetClassifierConfig(jsonStr string) string {
+	cfg := router.ParseClassifierConfig(jsonStr)
+	if err := a.core.SetClassifierConfig(cfg); err != nil {
+		return "error: " + err.Error()
+	}
+	return "OK"
+}
+
+func (a *App) GetActiveModels() string {
+	models := a.core.GetModels()
+	var active []core.ModelJSON
+	for _, m := range models {
+		if m.IsActive {
+			active = append(active, m)
+		}
+	}
+	return string(marshalJSON(active))
+}
+
 func (a *App) GetConfig(key string) string {
 	return a.core.GetConfig(key)
 }
@@ -293,6 +340,82 @@ func (a *App) SetConfig(key, value string) string {
 		return "error: " + err.Error()
 	}
 	return "OK"
+}
+
+// --- Tray menu ---
+
+func (a *App) refreshTrayMenu() {
+	lang := a.core.GetConfig("language")
+	if lang == "" {
+		lang = "en"
+	}
+
+	mode := a.core.GetProxyMode()
+	status := a.core.GetProxyStatus()
+
+	showLabel := "Show"
+	quitLabel := "Quit"
+	proxyStatusLabel := "API Proxy: Stopped"
+	modeLabel := "Mode: Auto"
+	langLabel := "Language: English"
+
+	if lang == "zh" {
+		showLabel = "显示"
+		quitLabel = "退出"
+		if status.Running {
+			proxyStatusLabel = "API 代理: 运行中 ✓"
+		} else {
+			proxyStatusLabel = "API 代理: 已停止"
+		}
+		switch mode {
+		case "auto":
+			modeLabel = "模式: 自动"
+		case "manual":
+			modeLabel = "模式: 手动"
+		case "race":
+			modeLabel = "模式: 竞速"
+		}
+		langLabel = "语言: 中文"
+	} else {
+		if status.Running {
+			proxyStatusLabel = "API Proxy: Running ✓"
+		} else {
+			proxyStatusLabel = "API Proxy: Stopped"
+		}
+		switch mode {
+		case "auto":
+			modeLabel = "Mode: Auto"
+		case "manual":
+			modeLabel = "Mode: Manual"
+		case "race":
+			modeLabel = "Mode: Race"
+		}
+		langLabel = "Language: English"
+	}
+
+	items := []wintray.MenuItem{
+		{ID: "show", Label: showLabel, Handler: func() { wailsRuntime.WindowShow(a.ctx) }},
+		{ID: "sep1", Sep: true},
+		{ID: "proxy_status", Label: proxyStatusLabel},
+		{ID: "mode", Label: modeLabel, Handler: func() {
+			next := map[string]string{"auto": "manual", "manual": "race", "race": "auto"}
+			newMode := next[mode]
+			_ = a.core.SetProxyMode(newMode)
+			a.refreshTrayMenu()
+		}},
+		{ID: "lang", Label: langLabel, Handler: func() {
+			newLang := "en"
+			if lang == "en" {
+				newLang = "zh"
+			}
+			_ = a.core.SetConfig("language", newLang)
+			a.refreshTrayMenu()
+		}},
+		{ID: "sep2", Sep: true},
+		{ID: "quit", Label: quitLabel, Handler: func() { a.QuitApp() }},
+	}
+
+	wintray.UpdateMenu(items)
 }
 
 // marshalJSON is a helper to JSON-marshal a value, returning empty slice on error.

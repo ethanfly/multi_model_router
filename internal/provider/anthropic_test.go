@@ -63,7 +63,7 @@ func TestAnthropicHealthCheckBadAuth(t *testing.T) {
 	defer server.Close()
 
 	p := NewAnthropic(server.URL, "bad-key")
-	err := p.HealthCheck(context.Background())
+	err := p.HealthCheck(context.Background(), "claude-haiku-4-5-20251001")
 	if err == nil {
 		t.Fatal("expected error for 401, got nil")
 	}

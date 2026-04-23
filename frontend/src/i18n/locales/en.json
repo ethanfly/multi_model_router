@@ -5,6 +5,7 @@
   "nav": {
     "chat": "Chat",
     "models": "Models",
+    "rules": "Rules",
     "dashboard": "Dashboard",
     "settings": "Settings"
   },
@@ -29,6 +30,9 @@
     "noUsageData": "No usage data yet",
     "noData": "No data yet",
     "noLogs": "No logs yet",
+    "prevPage": "Prev",
+    "nextPage": "Next",
+    "pageInfo": "Page {0} of {1}",
     "colTime": "Time",
     "colModel": "Model",
     "colComplexity": "Complexity",
@@ -62,7 +66,17 @@
     "copied": "Copied!",
     "proxyUrl": "Proxy URL:",
     "proxyError": "Proxy error",
-    "autoStartFail": "Failed to set auto-start"
+    "autoStartFail": "Failed to set auto-start",
+    "proxyMode": "Proxy Mode",
+    "proxyModeDesc": "Default routing mode for API proxy requests",
+    "proxyModeAuto": "Auto",
+    "proxyModeManual": "Manual",
+    "proxyModeRace": "Race",
+    "manualModel": "Manual Model",
+    "manualModelDesc": "Select the model to use in manual mode",
+    "proxyApiKey": "Proxy API Key",
+    "proxyApiKeyDesc": "API key required to access the proxy endpoint. Leave empty to disable auth.",
+    "proxyApiKeyHint": "Passed via Authorization: Bearer <key> or x-api-key header"
   },
   "titlebar": {
     "minimize": "Minimize",
@@ -88,7 +102,7 @@
     "addModel": "Add Model",
     "name": "Name",
     "provider": "Provider",
-    "baseUrl": "Base URL",
+    "baseUrl": "Base URL (include version, e.g. /v1)",
     "apiKey": "API Key",
     "modelId": "Model ID",
     "scores": "Scores (1-10)",
@@ -103,5 +117,29 @@
     "active": "Active",
     "cancel": "Cancel",
     "save": "Save"
+  },
+  "rules": {
+    "title": "Routing Rules",
+    "classifierConfig": "Classifier Configuration",
+    "complexKeywords": "Complex Keywords",
+    "complexKeywordsDesc": "Keywords that indicate complex questions (one per line)",
+    "simpleKeywords": "Simple Keywords",
+    "simpleKeywordsDesc": "Keywords that indicate simple questions (one per line)",
+    "multiStepKeywords": "Multi-step Keywords",
+    "multiStepKeywordsDesc": "Keywords indicating multi-step reasoning (one per line)",
+    "mathSymbols": "Math Symbols",
+    "mathSymbolsDesc": "Math symbols that indicate complex content (one per line)",
+    "codingKeywords": "Coding Keywords",
+    "codingKeywordsDesc": "Programming-specific keywords that indicate coding tasks (one per line)",
+    "reasoningKeywords": "Reasoning Keywords",
+    "reasoningKeywordsDesc": "Keywords indicating logical reasoning and analysis (one per line)",
+    "thresholds": "Complexity Thresholds",
+    "complexThreshold": "Complex Threshold",
+    "simpleThreshold": "Simple Threshold",
+    "thresholdHint": "Score >= complex threshold → Complex; Score <= simple threshold → Simple",
+    "save": "Save Rules",
+    "reset": "Reset to Default",
+    "saved": "Rules saved!",
+    "resetDone": "Reset to defaults"
   }
 }

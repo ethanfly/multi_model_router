@@ -6,12 +6,24 @@ export function DeleteModel(arg1) {
   return window['go']['main']['App']['DeleteModel'](arg1);
 }
 
+export function GetActiveModels() {
+  return window['go']['main']['App']['GetActiveModels']();
+}
+
 export function GetAutoStart() {
   return window['go']['main']['App']['GetAutoStart']();
 }
 
+export function GetClassifierConfig() {
+  return window['go']['main']['App']['GetClassifierConfig']();
+}
+
 export function GetConfig(arg1) {
   return window['go']['main']['App']['GetConfig'](arg1);
+}
+
+export function GetDashboardLogs(arg1, arg2) {
+  return window['go']['main']['App']['GetDashboardLogs'](arg1, arg2);
 }
 
 export function GetDashboardStats() {
@@ -20,6 +32,10 @@ export function GetDashboardStats() {
 
 export function GetModels() {
   return window['go']['main']['App']['GetModels']();
+}
+
+export function GetProxyMode() {
+  return window['go']['main']['App']['GetProxyMode']();
 }
 
 export function GetProxyStatus() {
@@ -54,8 +70,16 @@ export function SetAutoStart(arg1) {
   return window['go']['main']['App']['SetAutoStart'](arg1);
 }
 
+export function SetClassifierConfig(arg1) {
+  return window['go']['main']['App']['SetClassifierConfig'](arg1);
+}
+
 export function SetConfig(arg1, arg2) {
   return window['go']['main']['App']['SetConfig'](arg1, arg2);
+}
+
+export function SetProxyMode(arg1) {
+  return window['go']['main']['App']['SetProxyMode'](arg1);
 }
 
 export function StartProxy(arg1) {

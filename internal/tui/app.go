@@ -75,6 +75,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case keys.Toggle:
 			m.toggleProxy()
 			return m, m.refreshAll()
+		case keys.Mode:
+			m.cycleMode()
+			return m, m.refreshAll()
 		case keys.Reload:
 			m.core.ReloadModels()
 			return m, m.refreshAll()
@@ -161,6 +164,12 @@ func (m Model) toggleProxy() {
 		}
 		_ = m.core.StartProxy(port)
 	}
+}
+
+func (m Model) cycleMode() {
+	current := m.core.GetProxyMode()
+	next := map[string]string{"auto": "manual", "manual": "race", "race": "auto"}
+	_ = m.core.SetProxyMode(next[current])
 }
 
 func (m Model) refreshAll() tea.Cmd {

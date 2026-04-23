@@ -7,6 +7,31 @@ import (
 	"multi_model_router/internal/stats"
 )
 
+// GetDashboardLogs returns paginated recent logs and total count.
+func (c *Core) GetDashboardLogs(page, pageSize int) map[string]any {
+	result := map[string]any{
+		"logs":  []stats.RecentLog{},
+		"total": int64(0),
+		"page":  page,
+	}
+
+	if c.collector == nil {
+		return result
+	}
+
+	total, err := c.collector.GetTotalLogCount()
+	if err == nil {
+		result["total"] = total
+	}
+
+	logs, err := c.collector.GetRecentLogsPaginated(page, pageSize)
+	if err == nil {
+		result["logs"] = logs
+	}
+
+	return result
+}
+
 // GetDashboardStats returns today's aggregated statistics.
 func (c *Core) GetDashboardStats() map[string]any {
 	result := map[string]any{

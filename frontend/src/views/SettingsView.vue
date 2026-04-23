@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn } from '../../wailsjs/go/main/App'
+import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn, GetProxyMode, SetProxyMode as SetProxyModeFn, GetActiveModels } from '../../wailsjs/go/main/App'
 
 const proxyRunning = ref(false)
 const proxyPort = ref(9680)
@@ -10,6 +10,10 @@ const proxyLoading = ref(false)
 const copySuccess = ref(false)
 const autoStartEnabled = ref(false)
 const proxyAutoStart = ref(false)
+const proxyMode = ref('auto')
+const manualModelId = ref('')
+const proxyApiKey = ref('')
+const activeModels = ref<{modelId: string, name: string}[]>([])
 
 const { locale, t } = useI18n()
 const currentLang = computed({
@@ -17,6 +21,7 @@ const currentLang = computed({
   set: (val: string) => {
     locale.value = val
     localStorage.setItem('language', val)
+    SetConfig('language', val)
   },
 })
 
@@ -27,6 +32,13 @@ onMounted(async () => {
     const v = await GetConfig('proxy_enabled')
     proxyAutoStart.value = v === 'true'
   } catch { /* ignore */ }
+  try { proxyMode.value = await GetProxyMode() || 'auto' } catch { /* ignore */ }
+  try {
+    const raw = await GetActiveModels()
+    if (raw) activeModels.value = JSON.parse(raw)
+  } catch { /* ignore */ }
+  try { manualModelId.value = await GetConfig('manual_model_id') || '' } catch { /* ignore */ }
+  try { proxyApiKey.value = await GetConfig('proxy_api_key') || '' } catch { /* ignore */ }
 })
 
 async function loadProxyStatus() {
@@ -80,6 +92,30 @@ async function toggleAutoStart() {
 async function toggleProxyAutoStart() {
   try {
     await SetConfig('proxy_enabled', proxyAutoStart.value ? 'true' : 'false')
+  } catch { /* ignore */ }
+}
+
+async function changeProxyMode() {
+  try {
+    await SetProxyModeFn(proxyMode.value)
+    if (proxyMode.value === 'manual') {
+      const raw = await GetActiveModels()
+      if (raw) activeModels.value = JSON.parse(raw)
+    }
+  } catch (err: any) {
+    alert(t('settings.proxyError') + ': ' + (err.message || err))
+  }
+}
+
+async function changeManualModel() {
+  try {
+    await SetConfig('manual_model_id', manualModelId.value)
+  } catch { /* ignore */ }
+}
+
+async function saveProxyApiKey() {
+  try {
+    await SetConfig('proxy_api_key', proxyApiKey.value)
   } catch { /* ignore */ }
 }
 </script>
@@ -160,6 +196,51 @@ async function toggleProxyAutoStart() {
         <div v-if="proxyUrl" class="proxy-url">
           {{ $t('settings.proxyUrl') }} <code>{{ proxyUrl }}</code>
         </div>
+        <div class="mode-row">
+          <div class="mode-label-group">
+            <span class="mode-label">{{ $t('settings.proxyMode') }}</span>
+            <span class="mode-desc">{{ $t('settings.proxyModeDesc') }}</span>
+          </div>
+          <div class="mode-pills">
+            <button
+              :class="['mode-pill', proxyMode === 'auto' ? 'active' : '']"
+              @click="proxyMode = 'auto'; changeProxyMode()"
+            >{{ $t('settings.proxyModeAuto') }}</button>
+            <button
+              :class="['mode-pill', proxyMode === 'manual' ? 'active' : '']"
+              @click="proxyMode = 'manual'; changeProxyMode()"
+            >{{ $t('settings.proxyModeManual') }}</button>
+            <button
+              :class="['mode-pill', proxyMode === 'race' ? 'active' : '']"
+              @click="proxyMode = 'race'; changeProxyMode()"
+            >{{ $t('settings.proxyModeRace') }}</button>
+          </div>
+        </div>
+        <div v-if="proxyMode === 'manual'" class="manual-model-row">
+          <div class="mode-label-group">
+            <span class="mode-label">{{ $t('settings.manualModel') }}</span>
+            <span class="mode-desc">{{ $t('settings.manualModelDesc') }}</span>
+          </div>
+          <select v-model="manualModelId" @change="changeManualModel" class="model-select">
+            <option value="" disabled>{{ $t('chat.selectModel') }}</option>
+            <option v-for="m in activeModels" :key="m.modelId" :value="m.modelId">{{ m.name }}</option>
+          </select>
+        </div>
+        <div class="api-key-row">
+          <div class="mode-label-group">
+            <span class="mode-label">{{ $t('settings.proxyApiKey') }}</span>
+            <span class="mode-desc">{{ $t('settings.proxyApiKeyDesc') }}</span>
+          </div>
+          <input
+            type="password"
+            v-model="proxyApiKey"
+            @change="saveProxyApiKey"
+            class="api-key-input"
+            placeholder="sk-..."
+            autocomplete="off"
+          />
+        </div>
+        <div v-if="proxyApiKey" class="api-key-hint">{{ $t('settings.proxyApiKeyHint') }}</div>
       </div>
     </section>
   </div>
@@ -424,5 +505,128 @@ async function toggleProxyAutoStart() {
   padding: 6px 12px;
   font-size: 13px;
   min-width: 100px;
+}
+
+/* Mode selector pills */
+.mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(71, 85, 105, 0.3);
+}
+
+.mode-label-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mode-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.mode-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mode-pills {
+  display: flex;
+  gap: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.mode-pill {
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  background: var(--bg);
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.mode-pill:hover {
+  color: var(--text);
+  background: var(--surface-light);
+}
+
+.mode-pill.active {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: white;
+}
+
+.mode-pill + .mode-pill {
+  border-left: 1px solid var(--border);
+}
+
+.mode-pill.active + .mode-pill,
+.mode-pill + .mode-pill.active {
+  border-left-color: transparent;
+}
+
+/* Manual model select */
+.manual-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+/* API key row */
+.api-key-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.api-key-input {
+  width: 220px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  outline: none;
+  font-family: inherit;
+}
+
+.api-key-input:focus {
+  border-color: var(--primary);
+}
+
+.api-key-input::placeholder {
+  color: var(--text-muted);
+}
+
+.api-key-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
+.model-select {
+  padding: 6px 12px;
+  font-size: 13px;
+  min-width: 180px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  outline: none;
+}
+
+.model-select:focus {
+  border-color: var(--primary);
 }
 </style>
