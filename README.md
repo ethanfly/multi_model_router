@@ -13,8 +13,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org/)
-[![Wails](https://img.shields.io/badge/Wails-v2-purple?style=flat&logo=wails)](https://wails.io/)
-[![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat&logo=windows)](https://github.com/ethanfly/multi_model_router)
+[![Wails](https://img.shields.io/badge/Wails-v2.12-purple?style=flat&logo=wails)](https://wails.io/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4?style=flat&logo=windows)](https://github.com/ethanfly/multi_model_router)
 
 </p>
 
@@ -150,7 +150,7 @@ MultiModelRouter.exe tui
 <details>
 <summary>点击展开截图</summary>
 
-> GUI 界面截图待添加
+![应用截图](screenshot.png)
 
 </details>
 
@@ -161,32 +161,39 @@ MultiModelRouter.exe tui
 ```
 multi_model_router/
 ├── main.go                    # 入口：GUI / CLI 分发
-├── app.go                    # Wails GUI 绑定层
-├── trayicon.go               # 程序托盘图标生成
+├── app.go                     # Wails GUI 绑定层
+├── app_windows.go             # Windows 平台特定逻辑
+├── app_unix.go                # Unix 平台存根
+├── trayicon.go                # 系统托盘图标生成
 │
-├── frontend/                 # Vue 3 前端
+├── frontend/                  # Vue 3 + TypeScript 前端
 │   └── src/
-│       ├── views/           # 页面：聊天 / 模型 / 仪表盘 / 设置
-│       ├── components/       # 组件：标题栏 / 模型卡片 / 编辑器
-│       ├── stores/          # Pinia 状态管理
-│       └── i18n/           # 中英双语
+│       ├── views/             # ChatView / DashboardView / ModelsView / RulesView / SettingsView
+│       ├── components/        # TitleBar / ModelCard / ModelEditor / MessageBubble / PasswordDialog / RouteDiagnosticsCard
+│       ├── stores/            # Pinia 状态管理（models）
+│       └── i18n/              # 中英双语
 │
 ├── internal/
-│   ├── core/               # 核心业务逻辑（独立于 GUI）
-│   ├── cli/                # CLI 命令（cobra）
-│   ├── tui/               # 终端 UI（Bubble Tea）
-│   ├── config/            # 配置管理
-│   ├── db/                # SQLite 数据库层
-│   ├── router/            # 路由引擎 & 分类器
-│   ├── provider/          # AI 供应商适配（OpenAI / Anthropic）
-│   ├── proxy/             # HTTP 代理服务器
-│   ├── stats/            # 请求统计收集
-│   └── crypto/            # API Key 加密（AES-256-GCM）
+│   ├── autostart/             # Windows 开机自启动
+│   ├── core/                  # 核心业务逻辑（独立于 GUI）
+│   ├── cli/                   # CLI 命令（cobra）
+│   ├── tui/                   # 终端 UI（Bubble Tea）
+│   ├── config/                # 配置管理
+│   ├── db/                    # SQLite 数据库层 & 迁移
+│   ├── router/                # 路由引擎 & 请求复杂度分类器
+│   ├── provider/              # AI 供应商适配（OpenAI / Anthropic）
+│   ├── proxy/                 # HTTP 代理服务器（OpenAI 兼容）
+│   ├── stats/                 # 请求统计收集
+│   ├── crypto/                # API Key 加密（AES-256-GCM）
+│   └── wintray/               # Windows 系统托盘集成
 │
 ├── scripts/
-│   └── generate-icons.mjs # SVG → PNG / ICO 图标生成
+│   └── generate-icons.mjs     # SVG → PNG / ICO 图标生成
 │
-└── build/                  # 构建产物 & 图标资源
+├── docs/                      # 文档资源
+├── build/                     # 构建产物 & 图标资源
+├── build.bat                  # Windows 构建脚本
+└── build.sh                   # Linux/macOS 构建脚本
 ```
 
 ---
@@ -230,7 +237,7 @@ wails build -clean -ldflags "-s -w"
 
 | 层级 | 技术 |
 |------|------|
-| 桌面框架 | [Wails v2](https://wails.io/) |
+| 桌面框架 | [Wails v2.12](https://wails.io/) |
 | 后端语言 | Go 1.25 |
 | CLI 框架 | [Cobra](https://github.com/spf13/cobra) |
 | TUI 框架 | [Bubble Tea](https://github.com/charmbracelet/bubbletea) |
@@ -239,6 +246,7 @@ wails build -clean -ldflags "-s -w"
 | 状态管理 | Pinia |
 | 路由 | Vue Router 4 |
 | 国际化 | vue-i18n |
+| 加密 | golang.org/x/crypto |
 
 ---
 
