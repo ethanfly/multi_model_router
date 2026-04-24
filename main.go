@@ -16,6 +16,9 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// version is set via -ldflags "-X main.version=..." during build
+var version = "dev"
+
 func init() {
 	// Disable GPU acceleration — fixes WebView2 GPU process crash
 	os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu --disable-software-rasterizer")
@@ -24,6 +27,7 @@ func init() {
 func main() {
 	// If any CLI arguments are passed, run in CLI mode.
 	if len(os.Args) > 1 {
+		cli.Version = version
 		if err := cli.NewRootCommand().Execute(); err != nil {
 			os.Exit(1)
 		}

@@ -34,12 +34,25 @@ REM Install frontend dependencies
 echo ==^> Installing frontend dependencies...
 cd frontend && call npm install && cd ..
 
+REM Generate icons from SVG
+echo ==^> Generating icons from SVG...
+call node scripts\generate-icons.mjs
+if errorlevel 1 (
+    echo WARNING: Icon generation failed, using existing icons
+)
+
+REM Get version from git tag or use dev
+for /f "tokens=*" %%v in ('git describe --tags --always --dirty 2^>nul') do set "GIT_VERSION=%%v"
+if "%GIT_VERSION%"=="" set "GIT_VERSION=dev"
+
+echo ==^> Version: %GIT_VERSION%
+
 REM Build
 echo ==^> Compiling...
 if "%MODE%"=="dev" (
-    "!WAILS!" build
+    "!WAILS!" build -ldflags "-X main.version=%GIT_VERSION%"
 ) else (
-    "!WAILS!" build -clean -ldflags "-s -w"
+    "!WAILS!" build -clean -ldflags "-s -w -X main.version=%GIT_VERSION%"
 )
 
 REM Verify
@@ -48,6 +61,7 @@ if exist "%OUTPUT_DIR%\%BINARY%" (
     echo.
     echo ==^> Build successful!
     echo     Output: %OUTPUT_DIR%\%BINARY%
+    echo     Version: %GIT_VERSION%
     echo.
     echo Usage:
     echo     %OUTPUT_DIR%\%BINARY%                   # GUI mode

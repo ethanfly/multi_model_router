@@ -4,15 +4,22 @@ on:
   push:
     branches: [master]
     tags: ['v*']
-  pull_request:
-    branches: [master]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0)'
+        required: false
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -22,32 +29,62 @@ jobs:
         with:
           node-version: '20'
 
+      # Generate icons from SVG source
+      - name: Generate icons
+        run: |
+          npm install --no-save sharp png-to-ico
+          node scripts/generate-icons.mjs
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
+      # Determine version from tag, branch, or input
+      - name: Set version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="v0.0.0-dev.${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
       - name: Build
-        run: wails build -clean -ldflags "-s -w"
+        run: wails build -clean -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+
+      - name: Rename binary with version
+        shell: bash
+        run: |
+          mv build/bin/MultiModelRouter.exe "build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MultiModelRouter-windows-amd64
-          path: build/bin/MultiModelRouter.exe
+          name: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
+          path: build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
 
   release:
     needs: build-windows
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
     steps:
+      - name: Determine version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: MultiModelRouter-windows-amd64
+          name: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: MultiModelRouter.exe
+          files: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64.exe
           generate_release_notes: true
+          draft: false
+          prerelease: false
