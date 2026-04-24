@@ -564,3 +564,60 @@ func TestHandleChatCompletion_SetsDecisionHeaderFromDiagnostics(t *testing.T) {
 		t.Fatalf("expected decision header %q, got %q", diagnostics.Summary, got)
 	}
 }
+
+func TestSanitizeNullContent_ReplacesNull(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role": "user", "content": "hello"},
+			{"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "get_weather"}}]},
+			{"role": "tool", "content": "sunny"}
+		]`),
+	}
+
+	sanitizeNullContent(reqMap)
+
+	var msgs []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	json.Unmarshal(reqMap["messages"], &msgs)
+
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	if string(msgs[1].Content) != `""` {
+		t.Errorf("expected null content replaced with empty string, got %s", string(msgs[1].Content))
+	}
+	// Non-null content should be unchanged
+	if string(msgs[0].Content) != `"hello"` {
+		t.Errorf("expected user content unchanged, got %s", string(msgs[0].Content))
+	}
+}
+
+func TestSanitizeNullContent_NoNulls(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role": "user", "content": "hello"},
+			{"role": "assistant", "content": "hi there"}
+		]`),
+	}
+
+	original := string(reqMap["messages"])
+	sanitizeNullContent(reqMap)
+
+	if string(reqMap["messages"]) != original {
+		t.Error("expected messages unchanged when no null content")
+	}
+}
+
+func TestSanitizeNullContent_NoMessages(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"model": json.RawMessage(`"gpt-4"`),
+	}
+
+	sanitizeNullContent(reqMap)
+
+	if _, ok := reqMap["messages"]; ok {
+		t.Error("expected no messages key to remain absent")
+	}
+}

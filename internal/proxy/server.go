@@ -542,6 +542,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	convertSystemForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	sanitizeForProvider(reqMap, modelCfg.Provider)
 	stripThinkingBlocks(reqMap, isTargetAnthropic)
+	sanitizeNullContent(reqMap)
 	ensureMaxTokens(reqMap, isTargetAnthropic)
 	upstreamBody, _ := json.Marshal(reqMap)
 
@@ -1382,6 +1383,44 @@ func stripThinkingBlocks(reqMap map[string]json.RawMessage, isTargetAnthropic bo
 			json.Unmarshal(msgRaw, &msgMap)
 			msgMap["content"] = filteredRaw
 			msgs[i], _ = json.Marshal(msgMap)
+		}
+	}
+
+	if modified {
+		reqMap["messages"], _ = json.Marshal(msgs)
+	}
+}
+
+// sanitizeNullContent replaces null message content with empty strings.
+// Some upstream providers reject "content": null in messages.
+func sanitizeNullContent(reqMap map[string]json.RawMessage) {
+	msgsRaw, ok := reqMap["messages"]
+	if !ok {
+		return
+	}
+
+	var msgs []json.RawMessage
+	if json.Unmarshal(msgsRaw, &msgs) != nil {
+		return
+	}
+
+	modified := false
+	for i, msgRaw := range msgs {
+		var msg struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(msgRaw, &msg) != nil {
+			continue
+		}
+
+		if len(msg.Content) == 0 || string(msg.Content) == "null" {
+			var msgMap map[string]json.RawMessage
+			if json.Unmarshal(msgRaw, &msgMap) != nil {
+				continue
+			}
+			msgMap["content"] = json.RawMessage(`""`)
+			msgs[i], _ = json.Marshal(msgMap)
+			modified = true
 		}
 	}
 
