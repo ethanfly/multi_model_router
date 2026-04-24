@@ -29,8 +29,9 @@ jobs:
         with:
           node-version: '20'
 
-      # Generate icons from SVG source
-      - name: Generate icons
+      # Icons are committed to repo; regenerate only if SVG changed
+      - name: Generate icons (optional)
+        continue-on-error: true
         run: |
           npm install --no-save sharp png-to-ico
           node scripts/generate-icons.mjs
@@ -65,7 +66,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
-          path: build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
+          path: build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64.exe
 
   release:
     needs: build-windows
