@@ -714,14 +714,6 @@ func (s *Server) streamAndTrackOpenAI(w http.ResponseWriter, flusher http.Flushe
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	if firstN > 0 {
-		totalBytes += firstN
-		w.Write(buf[:firstN])
-		if canFlush {
-			flusher.Flush()
-		}
-	}
-
 	for scanner.Scan() {
 		line := scanner.Text()
 		totalBytes += len(line) + 1 // +1 for newline
@@ -763,14 +755,6 @@ func (s *Server) streamAndTrackAnthropic(w http.ResponseWriter, flusher http.Flu
 	)
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	if firstN > 0 {
-		totalBytes += firstN
-		w.Write(buf[:firstN])
-		if canFlush {
-			flusher.Flush()
-		}
-	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
