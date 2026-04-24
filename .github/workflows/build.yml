@@ -45,6 +45,12 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install Linux dependencies
+        if: matrix.runner == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+
       # Icons are committed; only regenerate on Windows (generates both ICO and PNG)
       - name: Generate icons
         if: matrix.runner == 'windows'
@@ -75,7 +81,12 @@ jobs:
         shell: bash
         run: |
           wails build -clean -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
-          BINARY="build/bin/MultiModelRouter${{ matrix.ext }}"
+          if [ "${{ matrix.runner }}" = "darwin" ]; then
+            APP_DIR="build/bin/multi_model_router.app"
+            BINARY="$APP_DIR/Contents/MacOS/MultiModelRouter"
+          else
+            BINARY="build/bin/MultiModelRouter${{ matrix.ext }}"
+          fi
           RENAMED="build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-${{ matrix.artifact }}${{ matrix.ext }}"
           mv "$BINARY" "$RENAMED"
           echo "artifact_path=$RENAMED" >> "$GITHUB_OUTPUT"
