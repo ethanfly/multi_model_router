@@ -95,6 +95,75 @@ func TestConvertMessagesForUpstream_OpenAIToolCallsToAnthropicToolUse(t *testing
 	}
 }
 
+func TestConvertMessagesForUpstream_OpenAIImageToAnthropicImage(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role":"user","content":[
+				{"type":"text","text":"describe"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}
+			]}
+		]`),
+	}
+
+	convertMessagesForUpstream(reqMap, false, true)
+
+	var msgs []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(reqMap["messages"], &msgs); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	var blocks []struct {
+		Type   string `json:"type"`
+		Source struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+		t.Fatalf("decode content blocks: %v", err)
+	}
+	if len(blocks) != 2 || blocks[1].Type != "image" || blocks[1].Source.Type != "base64" || blocks[1].Source.MediaType != "image/png" || blocks[1].Source.Data != "abc123" {
+		t.Fatalf("unexpected Anthropic image block: %+v", blocks)
+	}
+}
+
+func TestConvertMessagesForUpstream_AnthropicToolUseAndResultToOpenAI(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role":"assistant","content":[
+				{"type":"text","text":"checking"},
+				{"type":"tool_use","id":"call_1","name":"lookup","input":{"city":"Paris"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"sunny"}
+			]}
+		]`),
+	}
+
+	convertMessagesForUpstream(reqMap, true, false)
+
+	var msgs []struct {
+		Role       string          `json:"role"`
+		Content    string          `json:"content"`
+		ToolCalls  json.RawMessage `json:"tool_calls"`
+		ToolCallID string          `json:"tool_call_id"`
+	}
+	if err := json.Unmarshal(reqMap["messages"], &msgs); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 OpenAI messages, got %+v", msgs)
+	}
+	if msgs[0].Role != "assistant" || msgs[0].Content != "checking" || len(msgs[0].ToolCalls) == 0 {
+		t.Fatalf("unexpected assistant conversion: %+v", msgs[0])
+	}
+	if msgs[1].Role != "tool" || msgs[1].ToolCallID != "call_1" || msgs[1].Content != "sunny" {
+		t.Fatalf("unexpected tool_result conversion: %+v", msgs[1])
+	}
+}
+
 func TestPreserveCompletionTokenLimit_OpenAIToAnthropic(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"max_completion_tokens": json.RawMessage(`1234`),
@@ -102,6 +171,48 @@ func TestPreserveCompletionTokenLimit_OpenAIToAnthropic(t *testing.T) {
 	preserveCompletionTokenLimit(reqMap, true)
 	if string(reqMap["max_tokens"]) != `1234` {
 		t.Fatalf("expected max_tokens copied from max_completion_tokens, got %s", string(reqMap["max_tokens"]))
+	}
+}
+
+func TestConvertRequestParameters_OpenAIToAnthropic(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"stop": json.RawMessage(`["END"]`),
+		"user": json.RawMessage(`"user_123"`),
+	}
+
+	convertRequestParametersForUpstream(reqMap, false, true)
+
+	if string(reqMap["stop_sequences"]) != `["END"]` {
+		t.Fatalf("expected stop mapped to stop_sequences, got %s", string(reqMap["stop_sequences"]))
+	}
+	if _, ok := reqMap["stop"]; ok {
+		t.Fatal("expected OpenAI stop field removed for Anthropic target")
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal(reqMap["metadata"], &metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if metadata["user_id"] != "user_123" {
+		t.Fatalf("expected user mapped to metadata.user_id, got %+v", metadata)
+	}
+}
+
+func TestConvertRequestParameters_AnthropicToOpenAI(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"stop_sequences": json.RawMessage(`["END"]`),
+		"metadata":       json.RawMessage(`{"user_id":"user_123"}`),
+	}
+
+	convertRequestParametersForUpstream(reqMap, true, false)
+
+	if string(reqMap["stop"]) != `["END"]` {
+		t.Fatalf("expected stop_sequences mapped to stop, got %s", string(reqMap["stop"]))
+	}
+	if _, ok := reqMap["stop_sequences"]; ok {
+		t.Fatal("expected Anthropic stop_sequences field removed for OpenAI target")
+	}
+	if string(reqMap["user"]) != `"user_123"` {
+		t.Fatalf("expected metadata.user_id mapped to user, got %s", string(reqMap["user"]))
 	}
 }
 
@@ -524,6 +635,89 @@ func TestStripThinkingBlocks_StringContentNoOp(t *testing.T) {
 	}
 }
 
+func TestSanitizeThinkingForProtocol_OpenAIClientToAnthropicPreservesThinking(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"thinking": json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+		"messages": json.RawMessage(`[
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "hidden chain", "signature": "sig"},
+				{"type": "text", "text": "visible answer"}
+			]},
+			{"role": "user", "content": "continue"}
+		]`),
+	}
+	originalMessages := string(reqMap["messages"])
+
+	sanitizeThinkingForProtocol(reqMap, false, true)
+
+	if _, ok := reqMap["thinking"]; !ok {
+		t.Fatal("expected top-level thinking to be preserved for OpenAI-compatible clients")
+	}
+	if string(reqMap["messages"]) != originalMessages {
+		t.Fatalf("expected thinking content blocks to be preserved, got %s", string(reqMap["messages"]))
+	}
+}
+
+func TestSanitizeThinkingForProtocol_AnthropicClientPreservesThinking(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"thinking": json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+		"messages": json.RawMessage(`[
+			{"role": "assistant", "content": [
+				{"type": "thinking", "thinking": "hidden chain", "signature": "sig"},
+				{"type": "text", "text": "visible answer"}
+			]}
+		]`),
+	}
+	originalMessages := string(reqMap["messages"])
+
+	sanitizeThinkingForProtocol(reqMap, true, true)
+
+	if _, ok := reqMap["thinking"]; !ok {
+		t.Fatal("expected top-level thinking to be preserved for Anthropic clients")
+	}
+	if string(reqMap["messages"]) != originalMessages {
+		t.Fatalf("expected Anthropic message content to be unchanged, got %s", string(reqMap["messages"]))
+	}
+}
+
+func TestSanitizeThinkingForProtocol_AnthropicClientPreservesIncompleteThinkingHistory(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"thinking": json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+		"messages": json.RawMessage(`[
+			{"role": "assistant", "content": [{"type": "text", "text": "visible answer"}]},
+			{"role": "user", "content": "continue"}
+		]`),
+	}
+
+	sanitizeThinkingForProtocol(reqMap, true, true)
+
+	if _, ok := reqMap["thinking"]; !ok {
+		t.Fatal("expected thinking to be preserved even when existing history is incomplete")
+	}
+}
+
+func TestSanitizeThinkingForProtocol_AnthropicClientPreservesRedactedThinking(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"thinking": json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+		"messages": json.RawMessage(`[
+			{"role": "assistant", "content": [
+				{"type": "redacted_thinking", "data": "encrypted"},
+				{"type": "text", "text": "visible answer"}
+			]}
+		]`),
+	}
+	originalMessages := string(reqMap["messages"])
+
+	sanitizeThinkingForProtocol(reqMap, true, true)
+
+	if _, ok := reqMap["thinking"]; !ok {
+		t.Fatal("expected top-level thinking to be preserved with redacted thinking history")
+	}
+	if string(reqMap["messages"]) != originalMessages {
+		t.Fatalf("expected Anthropic message content to be unchanged, got %s", string(reqMap["messages"]))
+	}
+}
+
 func TestEnsureMaxTokens_CompletionTokensFallback(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"max_completion_tokens": json.RawMessage(`2048`),
@@ -710,6 +904,351 @@ func TestHandleChatCompletion_SetsDecisionHeaderFromDiagnostics(t *testing.T) {
 	}
 	if got := rr.Header().Get("X-Router-Decision"); got != diagnostics.Summary {
 		t.Fatalf("expected decision header %q, got %q", diagnostics.Summary, got)
+	}
+}
+
+func TestHandleChatCompletion_OpenAIClientToAnthropicPreservesThinking(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		if _, ok := payload["thinking"]; !ok {
+			t.Fatal("expected top-level thinking to be preserved for OpenAI-compatible client")
+		}
+		var msgs []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(payload["messages"], &msgs); err != nil {
+			t.Fatalf("decode upstream messages: %v", err)
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+			t.Fatalf("decode assistant content blocks: %v", err)
+		}
+		hasThinking := false
+		for _, block := range blocks {
+			if block.Type == "thinking" {
+				hasThinking = true
+			}
+		}
+		if !hasThinking {
+			t.Fatalf("expected thinking content blocks to be preserved, got %+v", blocks)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","model":"claude-test","content":[{"type":"thinking","thinking":"new hidden chain","signature":"new_sig"},{"type":"text","text":"ok"}],"usage":{"input_tokens":7,"output_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Claude",
+		Provider: "anthropic",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "claude-test",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	body := `{
+		"model":"auto",
+		"max_tokens":64,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"hidden chain","signature":"sig"},
+				{"type":"text","text":"visible answer"}
+			]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("expected OpenAI-compatible JSON, got %v body=%s", err, rr.Body.String())
+	}
+	if len(got.Choices) != 1 {
+		t.Fatalf("unexpected converted response: %+v", got)
+	}
+	var contentBlocks []struct {
+		Type      string `json:"type"`
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+		Text      string `json:"text"`
+	}
+	if err := json.Unmarshal(got.Choices[0].Message.Content, &contentBlocks); err != nil {
+		t.Fatalf("expected OpenAI response content blocks, got %v content=%s", err, string(got.Choices[0].Message.Content))
+	}
+	if len(contentBlocks) != 2 || contentBlocks[0].Type != "thinking" || contentBlocks[0].Thinking != "new hidden chain" || contentBlocks[0].Signature != "new_sig" || contentBlocks[1].Text != "ok" {
+		t.Fatalf("expected thinking and text blocks in OpenAI response, got %+v", contentBlocks)
+	}
+}
+
+func TestConvertNonStreamingResponse_AnthropicToolUseToOpenAIToolCalls(t *testing.T) {
+	body := []byte(`{"id":"msg_123","type":"message","role":"assistant","model":"claude-test","stop_reason":"tool_use","content":[{"type":"text","text":"checking"},{"type":"tool_use","id":"call_1","name":"lookup","input":{"city":"Paris"}}],"usage":{"input_tokens":7,"output_tokens":2}}`)
+
+	converted, err := convertNonStreamingResponse(body, true, "Claude")
+	if err != nil {
+		t.Fatalf("convert response: %v", err)
+	}
+	var got struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("decode converted response: %v body=%s", err, string(converted))
+	}
+	if got.Choices[0].FinishReason != "tool_calls" || got.Choices[0].Message.Content != "checking" {
+		t.Fatalf("unexpected converted choice: %+v", got.Choices[0])
+	}
+	if len(got.Choices[0].Message.ToolCalls) != 1 || got.Choices[0].Message.ToolCalls[0].ID != "call_1" || got.Choices[0].Message.ToolCalls[0].Function.Name != "lookup" || !strings.Contains(got.Choices[0].Message.ToolCalls[0].Function.Arguments, "Paris") {
+		t.Fatalf("unexpected tool calls: %+v", got.Choices[0].Message.ToolCalls)
+	}
+}
+
+func TestConvertNonStreamingResponse_OpenAIToolCallsToAnthropicToolUse(t *testing.T) {
+	body := []byte(`{"id":"chatcmpl_123","object":"chat.completion","model":"gpt","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"checking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Paris\"}"}}]}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
+
+	converted, err := convertNonStreamingResponse(body, false, "GPT")
+	if err != nil {
+		t.Fatalf("convert response: %v", err)
+	}
+	var got struct {
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type  string         `json:"type"`
+			Text  string         `json:"text"`
+			ID    string         `json:"id"`
+			Name  string         `json:"name"`
+			Input map[string]any `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(converted, &got); err != nil {
+		t.Fatalf("decode converted response: %v body=%s", err, string(converted))
+	}
+	if got.StopReason != "tool_use" || len(got.Content) != 2 || got.Content[0].Text != "checking" {
+		t.Fatalf("unexpected Anthropic response: %+v", got)
+	}
+	if got.Content[1].Type != "tool_use" || got.Content[1].ID != "call_1" || got.Content[1].Name != "lookup" || got.Content[1].Input["city"] != "Paris" {
+		t.Fatalf("unexpected tool_use block: %+v", got.Content[1])
+	}
+}
+
+func TestHandleChatCompletion_OpenAIClientToAnthropicStreamPreservesThinking(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hidden\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Claude",
+		Provider: "anthropic",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "claude-test",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"auto","stream":true,"max_tokens":64,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"type":"thinking"`) || !strings.Contains(body, `"thinking":"hidden"`) || !strings.Contains(body, `"signature":"sig"`) {
+		t.Fatalf("expected OpenAI stream to include thinking content block, got %s", body)
+	}
+	if !strings.Contains(body, `"type":"text"`) || !strings.Contains(body, `"text":"ok"`) {
+		t.Fatalf("expected OpenAI stream to include text content block after thinking, got %s", body)
+	}
+}
+
+func TestHandleChatCompletion_AnthropicClientToAnthropicPreservesThinking(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		if _, ok := payload["thinking"]; !ok {
+			t.Fatal("expected top-level thinking to be preserved for Anthropic clients")
+		}
+		var msgs []struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(payload["messages"], &msgs); err != nil {
+			t.Fatalf("decode upstream messages: %v", err)
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+			t.Fatalf("decode assistant content blocks: %v", err)
+		}
+		hasThinking := false
+		for _, block := range blocks {
+			if block.Type == "thinking" {
+				hasThinking = true
+			}
+		}
+		if !hasThinking {
+			t.Fatalf("expected thinking content block to be preserved, got %+v", blocks)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":7,"output_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Claude",
+		Provider: "anthropic",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "claude-test",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	body := `{
+		"model":"auto",
+		"max_tokens":64,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"hidden chain","signature":"sig"},
+				{"type":"text","text":"visible answer"}
+			]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"type":"message"`) {
+		t.Fatalf("expected native Anthropic response passthrough, got %s", rr.Body.String())
+	}
+}
+
+func TestHandleChatCompletion_AnthropicClientToAnthropicPreservesIncompleteThinkingHistory(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
+		}
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		if _, ok := payload["thinking"]; !ok {
+			t.Fatal("expected top-level thinking to be preserved")
+		}
+		var msgs []struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(payload["messages"], &msgs); err != nil {
+			t.Fatalf("decode upstream messages: %v", err)
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+			t.Fatalf("decode assistant content blocks: %v", err)
+		}
+		if len(blocks) != 1 || blocks[0].Type != "text" {
+			t.Fatalf("expected existing text-only content to be preserved, got %+v", blocks)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"msg_123","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":7,"output_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Claude",
+		Provider: "anthropic",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "claude-test",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	body := `{
+		"model":"auto",
+		"max_tokens":64,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[
+			{"role":"assistant","content":[{"type":"text","text":"visible answer"}]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

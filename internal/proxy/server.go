@@ -570,8 +570,10 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	convertToolChoiceForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	convertSystemForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	convertMessagesForUpstream(reqMap, isAnthropic, isTargetAnthropic)
+	convertRequestParametersForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	preserveCompletionTokenLimit(reqMap, isTargetAnthropic)
 	sanitizeForProvider(reqMap, modelCfg.Provider)
+	sanitizeThinkingForProtocol(reqMap, isAnthropic, isTargetAnthropic)
 	stripThinkingBlocks(reqMap, isTargetAnthropic)
 	sanitizeNullContent(reqMap)
 	ensureMaxTokens(reqMap, isTargetAnthropic)
@@ -881,6 +883,10 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		var inputTokens int
 		var contentReceived bool
+		var blockType string
+		var thinking strings.Builder
+		var signature string
+		var preserveContentBlocks bool
 
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -896,14 +902,19 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 			if isAnthropic {
 				var event struct {
 					Type    string `json:"type"`
+					Index   int    `json:"index"`
 					Message *struct {
 						Model string `json:"model"`
 						Usage *struct {
 							InputTokens int `json:"input_tokens"`
 						} `json:"usage"`
 					} `json:"message"`
-					Delta *struct {
-						Text string `json:"text"`
+					ContentBlock map[string]interface{} `json:"content_block"`
+					Delta        *struct {
+						Type      string `json:"type"`
+						Text      string `json:"text"`
+						Thinking  string `json:"thinking"`
+						Signature string `json:"signature"`
 					} `json:"delta"`
 					Usage *struct {
 						OutputTokens int `json:"output_tokens"`
@@ -922,11 +933,54 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 							inputTokens = event.Message.Usage.InputTokens
 						}
 					}
+				case "content_block_start":
+					blockType = ""
+					thinking.Reset()
+					signature = ""
+					if event.ContentBlock != nil {
+						if t, ok := event.ContentBlock["type"].(string); ok {
+							blockType = t
+						}
+						if blockType == "redacted_thinking" {
+							preserveContentBlocks = true
+							out <- provider.StreamChunk{ContentBlock: event.ContentBlock, Model: model}
+							contentReceived = true
+							blockType = ""
+						}
+						if blockType == "thinking" {
+							preserveContentBlocks = true
+						}
+					}
 				case "content_block_delta":
 					if event.Delta != nil && event.Delta.Text != "" {
-						out <- provider.StreamChunk{Content: event.Delta.Text, Model: model}
+						if preserveContentBlocks {
+							out <- provider.StreamChunk{ContentBlock: map[string]interface{}{"type": "text", "text": event.Delta.Text}, Model: model}
+						} else {
+							out <- provider.StreamChunk{Content: event.Delta.Text, Model: model}
+						}
 						contentReceived = true
 					}
+					if event.Delta != nil && event.Delta.Thinking != "" {
+						thinking.WriteString(event.Delta.Thinking)
+					}
+					if event.Delta != nil && event.Delta.Signature != "" {
+						signature = event.Delta.Signature
+					}
+				case "content_block_stop":
+					if blockType == "thinking" && thinking.Len() > 0 {
+						block := map[string]interface{}{
+							"type":     "thinking",
+							"thinking": thinking.String(),
+						}
+						if signature != "" {
+							block["signature"] = signature
+						}
+						out <- provider.StreamChunk{ContentBlock: block, Model: model}
+						contentReceived = true
+					}
+					blockType = ""
+					thinking.Reset()
+					signature = ""
 				case "message_delta":
 					usage := &provider.Usage{InputTokens: inputTokens}
 					if event.Usage != nil {
@@ -993,7 +1047,7 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 
 func convertNonStreamingResponse(body []byte, isUpstreamAnthropic bool, modelName string) ([]byte, error) {
 	if isUpstreamAnthropic {
-		content, usage, err := parseAnthropicNonStreaming(body)
+		message, usage, finishReason, err := parseAnthropicNonStreamingForOpenAI(body)
 		if err != nil {
 			return nil, err
 		}
@@ -1004,8 +1058,8 @@ func convertNonStreamingResponse(body []byte, isUpstreamAnthropic bool, modelNam
 			"model":   modelName,
 			"choices": []map[string]interface{}{{
 				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": content},
-				"finish_reason": "stop",
+				"message":       message,
+				"finish_reason": finishReason,
 			}},
 		}
 		if usage != nil {
@@ -1018,7 +1072,7 @@ func convertNonStreamingResponse(body []byte, isUpstreamAnthropic bool, modelNam
 		return json.Marshal(resp)
 	}
 
-	content, usage, err := parseOpenAINonStreaming(body)
+	content, usage, stopReason, err := parseOpenAINonStreamingForAnthropic(body)
 	if err != nil {
 		return nil, err
 	}
@@ -1027,15 +1081,218 @@ func convertNonStreamingResponse(body []byte, isUpstreamAnthropic bool, modelNam
 		"type":          "message",
 		"role":          "assistant",
 		"model":         modelName,
-		"stop_reason":   "end_turn",
+		"stop_reason":   stopReason,
 		"stop_sequence": nil,
-		"content":       []map[string]string{{"type": "text", "text": content}},
+		"content":       content,
 		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 0},
 	}
 	if usage != nil {
 		resp["usage"] = map[string]int{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens}
 	}
 	return json.Marshal(resp)
+}
+
+func parseAnthropicNonStreamingForOpenAI(body []byte) (map[string]interface{}, *provider.Usage, string, error) {
+	var resp struct {
+		Content    []map[string]interface{} `json:"content"`
+		StopReason string                   `json:"stop_reason"`
+		Usage      *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, nil, "", fmt.Errorf("decode Anthropic response: %w", err)
+	}
+
+	var textParts []string
+	var contentBlocks []map[string]interface{}
+	var toolCalls []map[string]interface{}
+	preserveBlocks := false
+	for _, block := range resp.Content {
+		blockType, _ := block["type"].(string)
+		switch blockType {
+		case "text":
+			if text, _ := block["text"].(string); text != "" {
+				textParts = append(textParts, text)
+				contentBlocks = append(contentBlocks, block)
+			}
+		case "thinking", "redacted_thinking":
+			contentBlocks = append(contentBlocks, block)
+			preserveBlocks = true
+		case "tool_use":
+			if call, ok := anthropicToolUseBlockToOpenAIInterface(block); ok {
+				toolCalls = append(toolCalls, call)
+			}
+		}
+	}
+
+	message := map[string]interface{}{"role": "assistant"}
+	if preserveBlocks {
+		message["content"] = contentBlocks
+	} else {
+		message["content"] = strings.Join(textParts, "")
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+		if message["content"] == nil {
+			message["content"] = ""
+		}
+	}
+
+	usage := (*provider.Usage)(nil)
+	if resp.Usage != nil {
+		usage = &provider.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
+	}
+	return message, usage, anthropicStopReasonToOpenAI(resp.StopReason), nil
+}
+
+func anthropicToolUseBlockToOpenAIInterface(block map[string]interface{}) (map[string]interface{}, bool) {
+	id, _ := block["id"].(string)
+	name, _ := block["name"].(string)
+	if id == "" || name == "" {
+		return nil, false
+	}
+	args := "{}"
+	if input, ok := block["input"]; ok && input != nil {
+		if b, err := json.Marshal(input); err == nil {
+			args = string(b)
+		}
+	}
+	return map[string]interface{}{
+		"id":   id,
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      name,
+			"arguments": args,
+		},
+	}, true
+}
+
+func parseOpenAINonStreamingForAnthropic(body []byte) ([]map[string]interface{}, *provider.Usage, string, error) {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content   interface{}              `json:"content"`
+				ToolCalls []map[string]interface{} `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, nil, "", fmt.Errorf("decode OpenAI response: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, nil, "", fmt.Errorf("OpenAI response missing choices")
+	}
+	choice := resp.Choices[0]
+	blocks := openAIContentToAnthropicBlocks(choice.Message.Content)
+	for _, call := range choice.Message.ToolCalls {
+		if block, ok := openAIToolCallToAnthropicInterface(call); ok {
+			blocks = append(blocks, block)
+		}
+	}
+	if len(blocks) == 0 {
+		blocks = []map[string]interface{}{{"type": "text", "text": ""}}
+	}
+	usage := (*provider.Usage)(nil)
+	if resp.Usage != nil {
+		usage = &provider.Usage{InputTokens: resp.Usage.PromptTokens, OutputTokens: resp.Usage.CompletionTokens}
+	}
+	return blocks, usage, openAIFinishReasonToAnthropic(choice.FinishReason), nil
+}
+
+func openAIContentToAnthropicBlocks(content interface{}) []map[string]interface{} {
+	switch v := content.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []map[string]interface{}{{"type": "text", "text": v}}
+	case []interface{}:
+		blocks := make([]map[string]interface{}, 0, len(v))
+		for _, item := range v {
+			m, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			t, _ := m["type"].(string)
+			switch t {
+			case "text", "thinking", "redacted_thinking", "tool_use", "tool_result", "image", "document":
+				blocks = append(blocks, m)
+			case "image_url", "input_image":
+				if block, ok := openAIImageInterfaceToAnthropic(m); ok {
+					blocks = append(blocks, block)
+				}
+			}
+		}
+		return blocks
+	default:
+		return nil
+	}
+}
+
+func openAIImageInterfaceToAnthropic(m map[string]interface{}) (map[string]interface{}, bool) {
+	var url string
+	if imageURL, ok := m["image_url"].(map[string]interface{}); ok {
+		url, _ = imageURL["url"].(string)
+	}
+	if url == "" {
+		url, _ = m["image"].(string)
+	}
+	if url == "" {
+		return nil, false
+	}
+	source := map[string]interface{}{}
+	if mediaType, data, ok := parseDataURL(url); ok {
+		source["type"] = "base64"
+		source["media_type"] = mediaType
+		source["data"] = data
+	} else {
+		source["type"] = "url"
+		source["url"] = url
+	}
+	return map[string]interface{}{"type": "image", "source": source}, true
+}
+
+func openAIToolCallToAnthropicInterface(call map[string]interface{}) (map[string]interface{}, bool) {
+	id, _ := call["id"].(string)
+	fn, _ := call["function"].(map[string]interface{})
+	name, _ := fn["name"].(string)
+	if id == "" || name == "" {
+		return nil, false
+	}
+	input := map[string]interface{}{}
+	if args, _ := fn["arguments"].(string); args != "" {
+		_ = json.Unmarshal([]byte(args), &input)
+	}
+	return map[string]interface{}{"type": "tool_use", "id": id, "name": name, "input": input}, true
+}
+
+func anthropicStopReasonToOpenAI(reason string) string {
+	switch reason {
+	case "max_tokens":
+		return "length"
+	case "tool_use":
+		return "tool_calls"
+	default:
+		return "stop"
+	}
+}
+
+func openAIFinishReasonToAnthropic(reason string) string {
+	switch reason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	default:
+		return "end_turn"
+	}
 }
 
 func parseOpenAINonStreaming(body []byte) (string, *provider.Usage, error) {
@@ -1064,13 +1321,10 @@ func parseOpenAINonStreaming(body []byte) (string, *provider.Usage, error) {
 	return content, usage, nil
 }
 
-func parseAnthropicNonStreaming(body []byte) (string, *provider.Usage, error) {
+func parseAnthropicNonStreaming(body []byte) (interface{}, *provider.Usage, error) {
 	var resp struct {
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		} `json:"content"`
-		Usage *struct {
+		Content []map[string]interface{} `json:"content"`
+		Usage   *struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
 		} `json:"usage"`
@@ -1079,14 +1333,24 @@ func parseAnthropicNonStreaming(body []byte) (string, *provider.Usage, error) {
 		return "", nil, fmt.Errorf("decode Anthropic response: %w", err)
 	}
 	var parts []string
+	preserveBlocks := false
 	for _, block := range resp.Content {
-		if block.Type == "text" && block.Text != "" {
-			parts = append(parts, block.Text)
+		blockType, _ := block["type"].(string)
+		switch blockType {
+		case "text":
+			if text, _ := block["text"].(string); text != "" {
+				parts = append(parts, text)
+			}
+		case "thinking", "redacted_thinking":
+			preserveBlocks = true
 		}
 	}
 	usage := (*provider.Usage)(nil)
 	if resp.Usage != nil {
 		usage = &provider.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
+	}
+	if preserveBlocks {
+		return resp.Content, usage, nil
 	}
 	return strings.Join(parts, ""), usage, nil
 }
@@ -1266,6 +1530,18 @@ func (s *Server) writeOpenAIStream(w http.ResponseWriter, result *router.RouteRe
 			})
 			hasSentContent = true
 		}
+		if chunk.ContentBlock != nil {
+			writeSSE(w, flusher, canFlush, map[string]interface{}{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   chunk.Model,
+				"choices": []map[string]interface{}{
+					{"index": 0, "delta": map[string]interface{}{"content": []interface{}{chunk.ContentBlock}}, "finish_reason": nil},
+				},
+			})
+			hasSentContent = true
+		}
 	}
 
 	if !hasSentContent {
@@ -1281,6 +1557,7 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 	w.Header().Set("Content-Type", "application/json")
 
 	var content string
+	var contentBlocks []interface{}
 	var usage *provider.Usage
 	for chunk := range result.Stream {
 		if chunk.Error != nil {
@@ -1292,6 +1569,9 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 			return
 		}
 		content += chunk.Content
+		if chunk.ContentBlock != nil {
+			contentBlocks = append(contentBlocks, chunk.ContentBlock)
+		}
 		if chunk.Usage != nil {
 			usage = chunk.Usage
 		}
@@ -1305,6 +1585,13 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 		rs.tokensIn = usage.InputTokens
 		rs.tokensOut = usage.OutputTokens
 	}
+	messageContent := interface{}(content)
+	if len(contentBlocks) > 0 {
+		if content != "" {
+			contentBlocks = append(contentBlocks, map[string]interface{}{"type": "text", "text": content})
+		}
+		messageContent = contentBlocks
+	}
 
 	resp := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -1314,7 +1601,7 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 		"choices": []map[string]interface{}{
 			{
 				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": content},
+				"message":       map[string]interface{}{"role": "assistant", "content": messageContent},
 				"finish_reason": "stop",
 			},
 		},
@@ -1488,6 +1775,9 @@ func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropi
 	}
 
 	toolsRaw, ok := reqMap["tools"]
+	if !ok && !isSourceAnthropic && isTargetAnthropic {
+		toolsRaw, ok = reqMap["functions"]
+	}
 	if !ok {
 		return
 	}
@@ -1527,7 +1817,8 @@ func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropi
 			// OpenAI → Anthropic: unwrap "function"
 			fnRaw, ok := tool["function"]
 			if !ok {
-				continue
+				fnJSON, _ := json.Marshal(tool)
+				fnRaw = fnJSON
 			}
 			var fn map[string]json.RawMessage
 			if json.Unmarshal(fnRaw, &fn) != nil {
@@ -1563,6 +1854,9 @@ func convertToolChoiceForUpstream(reqMap map[string]json.RawMessage, isSourceAnt
 	}
 
 	tcRaw, ok := reqMap["tool_choice"]
+	if !ok && !isSourceAnthropic && isTargetAnthropic {
+		tcRaw, ok = reqMap["function_call"]
+	}
 	if !ok {
 		return
 	}
@@ -1618,9 +1912,66 @@ func convertToolChoiceForUpstream(reqMap map[string]json.RawMessage, isSourceAnt
 						}
 					}
 				}
+			} else if name := tc["name"]; name != nil {
+				reqMap["tool_choice"] = json.RawMessage(
+					`{"type":"tool","name":` + string(name) + `}`,
+				)
 			}
 		}
 	}
+}
+
+func convertRequestParametersForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropic, isTargetAnthropic bool) {
+	if isSourceAnthropic == isTargetAnthropic {
+		return
+	}
+
+	if isTargetAnthropic {
+		if raw, ok := reqMap["stop"]; ok {
+			reqMap["stop_sequences"] = raw
+			delete(reqMap, "stop")
+		}
+		if raw, ok := reqMap["user"]; ok {
+			mergeMetadataUserID(reqMap, raw)
+			delete(reqMap, "user")
+		}
+		return
+	}
+
+	if raw, ok := reqMap["stop_sequences"]; ok {
+		reqMap["stop"] = raw
+		delete(reqMap, "stop_sequences")
+	}
+	if raw, ok := reqMap["metadata"]; ok {
+		if userID := metadataUserID(raw); userID != nil {
+			reqMap["user"] = userID
+		}
+	}
+}
+
+func mergeMetadataUserID(reqMap map[string]json.RawMessage, userRaw json.RawMessage) {
+	if len(userRaw) == 0 || string(userRaw) == "null" {
+		return
+	}
+	metadata := map[string]json.RawMessage{}
+	if raw, ok := reqMap["metadata"]; ok {
+		_ = json.Unmarshal(raw, &metadata)
+	}
+	if _, exists := metadata["user_id"]; !exists {
+		metadata["user_id"] = userRaw
+		reqMap["metadata"], _ = json.Marshal(metadata)
+	}
+}
+
+func metadataUserID(raw json.RawMessage) json.RawMessage {
+	var metadata map[string]json.RawMessage
+	if json.Unmarshal(raw, &metadata) != nil {
+		return nil
+	}
+	if userID, ok := metadata["user_id"]; ok {
+		return userID
+	}
+	return nil
 }
 
 func preserveCompletionTokenLimit(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
@@ -1657,6 +2008,14 @@ func convertMessagesForUpstream(reqMap map[string]json.RawMessage, isSourceAnthr
 		var role string
 		json.Unmarshal(msg["role"], &role)
 		switch {
+		case isTargetAnthropic:
+			if normalizeOpenAIContentForAnthropic(msg) {
+				modified = true
+			}
+			if role == "developer" {
+				msg["role"] = json.RawMessage(`"user"`)
+				modified = true
+			}
 		case isTargetAnthropic && role == "assistant":
 			modified = convertOpenAIToolCallsForAnthropic(msg) || modified
 		case isTargetAnthropic && role == "tool":
@@ -1665,13 +2024,28 @@ func convertMessagesForUpstream(reqMap map[string]json.RawMessage, isSourceAnthr
 			delete(msg, "tool_call_id")
 			delete(msg, "name")
 			modified = true
-		case !isTargetAnthropic && role == "assistant":
-			modified = dropAnthropicOnlyContentBlocks(msg) || modified
-		case !isTargetAnthropic && role != "system" && role != "user" && role != "assistant" && role != "tool":
+		case !isTargetAnthropic:
+			openAIMsgs, changed := convertAnthropicMessageForOpenAI(msg)
+			if changed {
+				modified = true
+			}
+			converted = append(converted, openAIMsgs...)
+			continue
+		case role != "system" && role != "user" && role != "assistant" && role != "tool":
 			msg["role"] = json.RawMessage(`"user"`)
 			modified = true
 		}
 
+		if isTargetAnthropic && role == "assistant" {
+			modified = convertOpenAIToolCallsForAnthropic(msg) || modified
+		}
+		if isTargetAnthropic && role == "tool" {
+			msg["role"] = json.RawMessage(`"user"`)
+			msg["content"] = anthropicToolResultContent(msg)
+			delete(msg, "tool_call_id")
+			delete(msg, "name")
+			modified = true
+		}
 		converted = append(converted, msg)
 	}
 
@@ -1691,12 +2065,13 @@ func convertOpenAIToolCallsForAnthropic(msg map[string]json.RawMessage) bool {
 		return false
 	}
 
-	var blocks []map[string]json.RawMessage
-	contentText := textFromRawMessage(msg["content"])
-	if contentText != "" {
-		textBlock := map[string]json.RawMessage{"type": json.RawMessage(`"text"`)}
-		textBlock["text"], _ = json.Marshal(contentText)
-		blocks = append(blocks, textBlock)
+	blocks := contentBlocksFromRaw(msg["content"])
+	if len(blocks) == 0 {
+		if contentText := textFromRawMessage(msg["content"]); contentText != "" {
+			textBlock := map[string]json.RawMessage{"type": json.RawMessage(`"text"`)}
+			textBlock["text"], _ = json.Marshal(contentText)
+			blocks = append(blocks, textBlock)
+		}
 	}
 
 	for _, call := range toolCalls {
@@ -1747,6 +2122,251 @@ func textFromRawMessage(raw json.RawMessage) string {
 		return text
 	}
 	return ""
+}
+
+func contentBlocksFromRaw(raw json.RawMessage) []map[string]json.RawMessage {
+	var blocks []map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	return blocks
+}
+
+func normalizeOpenAIContentForAnthropic(msg map[string]json.RawMessage) bool {
+	raw := msg["content"]
+	blocks := contentBlocksFromRaw(raw)
+	if len(blocks) == 0 {
+		return false
+	}
+
+	modified := false
+	converted := make([]map[string]json.RawMessage, 0, len(blocks))
+	for _, block := range blocks {
+		var blockType string
+		_ = json.Unmarshal(block["type"], &blockType)
+		switch blockType {
+		case "image_url", "input_image":
+			if imageBlock, ok := openAIImageBlockToAnthropic(block); ok {
+				converted = append(converted, imageBlock)
+				modified = true
+			} else {
+				converted = append(converted, block)
+			}
+		default:
+			converted = append(converted, block)
+		}
+	}
+	if modified {
+		msg["content"], _ = json.Marshal(converted)
+	}
+	return modified
+}
+
+func openAIImageBlockToAnthropic(block map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	url := rawString(block["image_url"])
+	if url == "" {
+		var imageURL map[string]json.RawMessage
+		if json.Unmarshal(block["image_url"], &imageURL) == nil {
+			url = rawString(imageURL["url"])
+		}
+	}
+	if url == "" {
+		url = rawString(block["image"])
+	}
+	if url == "" {
+		return nil, false
+	}
+
+	source := map[string]json.RawMessage{}
+	if mediaType, data, ok := parseDataURL(url); ok {
+		source["type"] = json.RawMessage(`"base64"`)
+		source["media_type"], _ = json.Marshal(mediaType)
+		source["data"], _ = json.Marshal(data)
+	} else {
+		source["type"] = json.RawMessage(`"url"`)
+		source["url"], _ = json.Marshal(url)
+	}
+	sourceJSON, _ := json.Marshal(source)
+	return map[string]json.RawMessage{
+		"type":   json.RawMessage(`"image"`),
+		"source": sourceJSON,
+	}, true
+}
+
+func parseDataURL(url string) (string, string, bool) {
+	if !strings.HasPrefix(url, "data:") {
+		return "", "", false
+	}
+	header, data, ok := strings.Cut(strings.TrimPrefix(url, "data:"), ",")
+	if !ok || !strings.HasSuffix(header, ";base64") {
+		return "", "", false
+	}
+	return strings.TrimSuffix(header, ";base64"), data, true
+}
+
+func convertAnthropicMessageForOpenAI(msg map[string]json.RawMessage) ([]map[string]json.RawMessage, bool) {
+	var role string
+	_ = json.Unmarshal(msg["role"], &role)
+	if role != "system" && role != "user" && role != "assistant" && role != "tool" {
+		msg["role"] = json.RawMessage(`"user"`)
+		role = "user"
+	}
+
+	blocks := contentBlocksFromRaw(msg["content"])
+	if len(blocks) == 0 {
+		return []map[string]json.RawMessage{msg}, role != rawString(msg["role"])
+	}
+
+	var textParts []string
+	var contentParts []map[string]json.RawMessage
+	var toolCalls []map[string]json.RawMessage
+	var toolMessages []map[string]json.RawMessage
+	modified := false
+
+	for _, block := range blocks {
+		var blockType string
+		_ = json.Unmarshal(block["type"], &blockType)
+		switch blockType {
+		case "text":
+			text := rawString(block["text"])
+			if text == "" {
+				continue
+			}
+			textParts = append(textParts, text)
+			contentParts = append(contentParts, map[string]json.RawMessage{
+				"type": json.RawMessage(`"text"`),
+				"text": block["text"],
+			})
+		case "image":
+			if part, ok := anthropicImageBlockToOpenAI(block); ok {
+				contentParts = append(contentParts, part)
+				modified = true
+			}
+		case "tool_use":
+			if role == "assistant" {
+				if call, ok := anthropicToolUseToOpenAI(block); ok {
+					toolCalls = append(toolCalls, call)
+					modified = true
+				}
+			}
+		case "tool_result":
+			if toolMsg, ok := anthropicToolResultToOpenAI(block); ok {
+				toolMessages = append(toolMessages, toolMsg)
+				modified = true
+			}
+		case "thinking", "redacted_thinking":
+			modified = true
+		default:
+			modified = true
+		}
+	}
+
+	if len(toolMessages) > 0 {
+		return toolMessages, true
+	}
+
+	if len(contentParts) > 0 && len(contentParts) != len(textParts) {
+		msg["content"], _ = json.Marshal(contentParts)
+		modified = true
+	} else {
+		msg["content"], _ = json.Marshal(strings.Join(textParts, ""))
+		modified = true
+	}
+	if len(toolCalls) > 0 {
+		msg["tool_calls"], _ = json.Marshal(toolCalls)
+	}
+	return []map[string]json.RawMessage{msg}, modified
+}
+
+func anthropicImageBlockToOpenAI(block map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	var source map[string]json.RawMessage
+	if json.Unmarshal(block["source"], &source) != nil {
+		return nil, false
+	}
+	sourceType := rawString(source["type"])
+	url := rawString(source["url"])
+	if sourceType == "base64" {
+		mediaType := rawString(source["media_type"])
+		data := rawString(source["data"])
+		if mediaType != "" && data != "" {
+			url = "data:" + mediaType + ";base64," + data
+		}
+	}
+	if url == "" {
+		return nil, false
+	}
+	imageURL, _ := json.Marshal(map[string]string{"url": url})
+	return map[string]json.RawMessage{
+		"type":      json.RawMessage(`"image_url"`),
+		"image_url": imageURL,
+	}, true
+}
+
+func anthropicToolUseToOpenAI(block map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	id := block["id"]
+	name := block["name"]
+	if len(id) == 0 || len(name) == 0 {
+		return nil, false
+	}
+	args := "{}"
+	if input := block["input"]; len(input) > 0 {
+		args = string(input)
+	}
+	fn, _ := json.Marshal(map[string]json.RawMessage{
+		"name":      name,
+		"arguments": mustJSONMarshal(args),
+	})
+	return map[string]json.RawMessage{
+		"id":       id,
+		"type":     json.RawMessage(`"function"`),
+		"function": fn,
+	}, true
+}
+
+func anthropicToolResultToOpenAI(block map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
+	toolUseID := block["tool_use_id"]
+	if len(toolUseID) == 0 {
+		return nil, false
+	}
+	content := textFromContentRaw(block["content"])
+	msg := map[string]json.RawMessage{
+		"role":         json.RawMessage(`"tool"`),
+		"tool_call_id": toolUseID,
+	}
+	msg["content"], _ = json.Marshal(content)
+	return msg, true
+}
+
+func textFromContentRaw(raw json.RawMessage) string {
+	if text := rawString(raw); text != "" {
+		return text
+	}
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(raw, &blocks) == nil {
+		var parts []string
+		for _, block := range blocks {
+			if rawString(block["type"]) == "text" {
+				if text := rawString(block["text"]); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return string(raw)
+}
+
+func rawString(raw json.RawMessage) string {
+	var s string
+	if len(raw) > 0 && json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return ""
+}
+
+func mustJSONMarshal(v interface{}) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func anthropicToolResultContent(msg map[string]json.RawMessage) json.RawMessage {
@@ -1809,6 +2429,9 @@ var openAIFields = map[string]bool{
 	"logit_bias": true, "user": true, "response_format": true, "seed": true,
 	"tools": true, "tool_choice": true, "parallel_tool_calls": true,
 	"logprobs": true, "top_logprobs": true, "reasoning_effort": true,
+	"functions": true, "function_call": true, "store": true, "metadata": true,
+	"service_tier": true, "modalities": true, "audio": true, "prediction": true,
+	"web_search_options": true,
 }
 
 // anthropicFields are fields accepted by the Anthropic messages API.
@@ -1817,6 +2440,8 @@ var anthropicFields = map[string]bool{
 	"temperature": true, "top_p": true, "top_k": true, "stream": true,
 	"stop_sequences": true, "system": true, "tools": true,
 	"tool_choice": true, "thinking": true, "metadata": true,
+	"container": true, "context_management": true, "mcp_servers": true,
+	"service_tier": true,
 }
 
 // sanitizeForProvider removes fields that the target provider doesn't support.
@@ -1830,6 +2455,16 @@ func sanitizeForProvider(reqMap map[string]json.RawMessage, provider string) {
 			delete(reqMap, k)
 		}
 	}
+}
+
+// sanitizeThinkingForProtocol intentionally keeps Anthropic thinking untouched.
+// The response converter bridges thinking blocks back to OpenAI-compatible clients.
+func sanitizeThinkingForProtocol(reqMap map[string]json.RawMessage, isSourceAnthropic, isTargetAnthropic bool) {
+	// When the target is Anthropic, thinking must be forwarded exactly as the
+	// client provided it. Non-Anthropic cleanup is handled by stripThinkingBlocks.
+	_ = reqMap
+	_ = isSourceAnthropic
+	_ = isTargetAnthropic
 }
 
 // stripThinkingBlocks removes Anthropic "thinking" content blocks from messages
@@ -1869,7 +2504,7 @@ func stripThinkingBlocks(reqMap map[string]json.RawMessage, isTargetAnthropic bo
 		for _, block := range blocks {
 			var blockType string
 			json.Unmarshal(block["type"], &blockType)
-			if blockType != "thinking" {
+			if blockType != "thinking" && blockType != "redacted_thinking" {
 				filtered = append(filtered, block)
 			}
 		}
@@ -1969,10 +2604,11 @@ func convertSystemForUpstream(reqMap map[string]json.RawMessage, isSourceAnthrop
 		for _, m := range msgs {
 			var role string
 			json.Unmarshal(m["role"], &role)
-			if role == "system" {
-				var content string
-				json.Unmarshal(m["content"], &content)
-				systemTexts = append(systemTexts, content)
+			if role == "system" || role == "developer" {
+				content := textFromContentRaw(m["content"])
+				if content != "" {
+					systemTexts = append(systemTexts, content)
+				}
 			} else {
 				remaining = append(remaining, m)
 			}

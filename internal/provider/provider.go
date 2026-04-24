@@ -41,11 +41,12 @@ type ChatRequest struct {
 }
 
 type StreamChunk struct {
-	Content   string
-	Done      bool
-	Model     string
-	Usage     *Usage
-	Error     error
+	Content      string
+	ContentBlock map[string]interface{}
+	Done         bool
+	Model        string
+	Usage        *Usage
+	Error        error
 }
 
 type Usage struct {
