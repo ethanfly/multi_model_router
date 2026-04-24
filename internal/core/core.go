@@ -131,10 +131,12 @@ func (c *Core) SetClassifierConfig(cfg *router.ClassifierConfig) error {
 		modeStr := c.getProxyModeLocked()
 		routeMode := router.RouteModeFromString(modeStr)
 		proxyAPIKey := ""
+		manualModelID := ""
 		if c.db != nil {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+			manualModelID, _ = c.db.GetConfig("manual_model_id")
 		}
-		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.proxy = proxy.NewWithManualModel(port, c.engine, routeMode, manualModelID, proxyAPIKey)
 		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			log.Printf("failed to restart proxy after classifier config change: %v", err)

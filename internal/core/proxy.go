@@ -23,10 +23,12 @@ func (c *Core) StartProxy(port int) error {
 	modeStr := c.getProxyModeLocked()
 	routeMode := router.RouteModeFromString(modeStr)
 	proxyAPIKey := ""
+	manualModelID := ""
 	if c.db != nil {
 		proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+		manualModelID, _ = c.db.GetConfig("manual_model_id")
 	}
-	c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+	c.proxy = proxy.NewWithManualModel(port, c.engine, routeMode, manualModelID, proxyAPIKey)
 	c.wireProxyLogger()
 	if err := c.proxy.Start(); err != nil {
 		return fmt.Errorf("start proxy: %w", err)
@@ -103,10 +105,12 @@ func (c *Core) SetProxyMode(mode string) error {
 		c.proxy.Stop()
 		routeMode := router.RouteModeFromString(mode)
 		proxyAPIKey := ""
+		manualModelID := ""
 		if c.db != nil {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+			manualModelID, _ = c.db.GetConfig("manual_model_id")
 		}
-		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.proxy = proxy.NewWithManualModel(port, c.engine, routeMode, manualModelID, proxyAPIKey)
 		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			return fmt.Errorf("restart proxy with new mode: %w", err)

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"multi_model_router/internal/proxy"
+	"multi_model_router/internal/router"
 	"multi_model_router/internal/stats"
 )
 
@@ -90,5 +92,20 @@ func (c *Core) SetConfig(key, value string) error {
 	if c.db == nil {
 		return fmt.Errorf("database not initialized")
 	}
-	return c.db.SetConfig(key, value)
+	if err := c.db.SetConfig(key, value); err != nil {
+		return err
+	}
+	if key == "manual_model_id" && c.proxy != nil {
+		port := c.proxy.Port()
+		c.proxy.Stop()
+		modeStr := c.getProxyModeLocked()
+		routeMode := router.RouteModeFromString(modeStr)
+		proxyAPIKey, _ := c.db.GetConfig("proxy_api_key")
+		c.proxy = proxy.NewWithManualModel(port, c.engine, routeMode, value, proxyAPIKey)
+		c.wireProxyLogger()
+		if err := c.proxy.Start(); err != nil {
+			return fmt.Errorf("restart proxy with manual model: %w", err)
+		}
+	}
+	return nil
 }

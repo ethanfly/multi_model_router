@@ -10,7 +10,7 @@ import (
 	"multi_model_router/internal/provider"
 )
 
-func TestSelectModel_SimplePrefersSpeed(t *testing.T) {
+func TestSelectModel_SimplePrefersCostEfficiency(t *testing.T) {
 	e := NewEngine(NewClassifier(nil, nil))
 
 	fastModel := &ModelConfig{
@@ -18,35 +18,75 @@ func TestSelectModel_SimplePrefersSpeed(t *testing.T) {
 		Name:           "Fast Model",
 		Provider:       "test",
 		ModelID:        "fast-v1",
-		Reasoning:      3,
-		Coding:         3,
-		Creativity:     3,
+		Reasoning:      4,
+		Coding:         4,
+		Creativity:     4,
 		Speed:          9,
-		CostEfficiency: 5,
+		CostEfficiency: 3,
 		IsActive:       true,
 	}
 
-	smartModel := &ModelConfig{
-		ID:             "smart",
-		Name:           "Smart Model",
+	budgetModel := &ModelConfig{
+		ID:             "budget",
+		Name:           "Budget Model",
 		Provider:       "test",
-		ModelID:        "smart-v1",
-		Reasoning:      9,
-		Coding:         3,
-		Creativity:     3,
-		Speed:          3,
-		CostEfficiency: 5,
+		ModelID:        "budget-v1",
+		Reasoning:      4,
+		Coding:         4,
+		Creativity:     4,
+		Speed:          5,
+		CostEfficiency: 9,
 		IsActive:       true,
 	}
 
-	e.SetModels([]*ModelConfig{fastModel, smartModel})
+	e.SetModels([]*ModelConfig{fastModel, budgetModel})
 
 	selected := e.selectModel(Simple, &RouteRequest{})
 	if selected == nil {
 		t.Fatal("expected a model to be selected, got nil")
 	}
-	if selected.ID != "fast" {
-		t.Errorf("expected fast model for Simple, got %s", selected.ID)
+	if selected.ID != "budget" {
+		t.Errorf("expected budget model for Simple, got %s", selected.ID)
+	}
+}
+
+func TestSelectModel_MediumPrefersCostEfficientBalancedModel(t *testing.T) {
+	e := NewEngine(NewClassifier(nil, nil))
+
+	premiumModel := &ModelConfig{
+		ID:             "premium",
+		Name:           "Premium Model",
+		Provider:       "test",
+		ModelID:        "premium-v1",
+		Reasoning:      8,
+		Coding:         8,
+		Creativity:     5,
+		Speed:          6,
+		CostEfficiency: 3,
+		IsActive:       true,
+	}
+
+	balancedModel := &ModelConfig{
+		ID:             "balanced",
+		Name:           "Balanced Model",
+		Provider:       "test",
+		ModelID:        "balanced-v1",
+		Reasoning:      7,
+		Coding:         7,
+		Creativity:     5,
+		Speed:          6,
+		CostEfficiency: 9,
+		IsActive:       true,
+	}
+
+	e.SetModels([]*ModelConfig{premiumModel, balancedModel})
+
+	selected := e.selectModel(Medium, &RouteRequest{})
+	if selected == nil {
+		t.Fatal("expected a model to be selected, got nil")
+	}
+	if selected.ID != "balanced" {
+		t.Errorf("expected balanced model for Medium, got %s", selected.ID)
 	}
 }
 

@@ -9,9 +9,156 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"multi_model_router/internal/router"
 )
+
+func TestConvertMessagesForUpstream_OpenAIToolMessageToAnthropicUserToolResult(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"sunny"}
+		]`),
+	}
+
+	convertMessagesForUpstream(reqMap, false, true)
+
+	var msgs []struct {
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCallID string          `json:"tool_call_id"`
+	}
+	if err := json.Unmarshal(reqMap["messages"], &msgs); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[1].Role != "user" {
+		t.Fatalf("expected tool message role converted to user, got %q", msgs[1].Role)
+	}
+	if msgs[1].ToolCallID != "" {
+		t.Fatalf("expected tool_call_id removed from Anthropic message, got %q", msgs[1].ToolCallID)
+	}
+	var content []struct {
+		Type      string `json:"type"`
+		ToolUseID string `json:"tool_use_id"`
+		Content   string `json:"content"`
+	}
+	if err := json.Unmarshal(msgs[1].Content, &content); err != nil {
+		t.Fatalf("decode tool_result content: %v", err)
+	}
+	if len(content) != 1 || content[0].Type != "tool_result" || content[0].ToolUseID != "call_1" || content[0].Content != "sunny" {
+		t.Fatalf("unexpected tool_result content: %+v", content)
+	}
+}
+
+func TestConvertMessagesForUpstream_OpenAIToolCallsToAnthropicToolUse(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role":"assistant","content":"checking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Paris\"}"}}]}
+		]`),
+	}
+
+	convertMessagesForUpstream(reqMap, false, true)
+
+	var msgs []struct {
+		Role      string          `json:"role"`
+		Content   json.RawMessage `json:"content"`
+		ToolCalls json.RawMessage `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(reqMap["messages"], &msgs); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Role != "assistant" {
+		t.Fatalf("unexpected messages: %+v", msgs)
+	}
+	if len(msgs[0].ToolCalls) != 0 {
+		t.Fatalf("expected tool_calls removed, got %s", string(msgs[0].ToolCalls))
+	}
+	var blocks []struct {
+		Type  string         `json:"type"`
+		Text  string         `json:"text"`
+		ID    string         `json:"id"`
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+		t.Fatalf("decode content blocks: %v", err)
+	}
+	if len(blocks) != 2 || blocks[0].Type != "text" || blocks[0].Text != "checking" {
+		t.Fatalf("expected leading text block, got %+v", blocks)
+	}
+	if blocks[1].Type != "tool_use" || blocks[1].ID != "call_1" || blocks[1].Name != "lookup" || blocks[1].Input["city"] != "Paris" {
+		t.Fatalf("unexpected tool_use block: %+v", blocks[1])
+	}
+}
+
+func TestPreserveCompletionTokenLimit_OpenAIToAnthropic(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"max_completion_tokens": json.RawMessage(`1234`),
+	}
+	preserveCompletionTokenLimit(reqMap, true)
+	if string(reqMap["max_tokens"]) != `1234` {
+		t.Fatalf("expected max_tokens copied from max_completion_tokens, got %s", string(reqMap["max_tokens"]))
+	}
+}
+
+func TestHandleChatCompletion_ManualModeUsesConfiguredModel(t *testing.T) {
+	var upstreamModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		upstreamModel = payload.Model
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_123","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	selected := &router.ModelConfig{ID: "selected", Name: "Selected", Provider: "openai", BaseURL: upstream.URL, APIKey: "secret", ModelID: "gpt-selected"}
+	s := &Server{router: selectionExplainerRouter{model: selected}, defaultMode: router.RouteManual, manualModelID: "selected", httpClient: upstream.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamModel != "gpt-selected" {
+		t.Fatalf("expected configured manual model sent upstream, got %q", upstreamModel)
+	}
+}
+
+func TestNewWithManualModel_UsesLongProxyTimeout(t *testing.T) {
+	s := NewWithManualModel(9680, nil, router.RouteAuto, "", "")
+	if s.httpClient.Timeout != 30*time.Minute {
+		t.Fatalf("expected 30 minute timeout, got %s", s.httpClient.Timeout)
+	}
+}
+func TestInjectStreamOptions_OnlyForStreaming(t *testing.T) {
+	nonStreaming := []byte(`{"model":"gpt","stream":false}`)
+	if got := injectStreamOptions(nonStreaming); string(got) != string(nonStreaming) {
+		t.Fatalf("expected non-streaming request unchanged, got %s", string(got))
+	}
+
+	streaming := injectStreamOptions([]byte(`{"model":"gpt","stream":true}`))
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(streaming, &payload); err != nil {
+		t.Fatalf("decode streaming payload: %v", err)
+	}
+	if _, ok := payload["stream_options"]; !ok {
+		t.Fatalf("expected stream_options injected, got %s", string(streaming))
+	}
+}
 
 func TestConvertToolsForUpstream_AnthropicToOpenAI(t *testing.T) {
 	reqMap := map[string]json.RawMessage{

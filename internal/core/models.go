@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"multi_model_router/internal/crypto"
-	"multi_model_router/internal/proxy"
 	"multi_model_router/internal/provider"
+	"multi_model_router/internal/proxy"
 	"multi_model_router/internal/router"
 	"multi_model_router/internal/stats"
 )
@@ -185,10 +185,12 @@ func (c *Core) SaveModel(m ModelJSON) error {
 		modeStr := c.getProxyModeLocked()
 		routeMode := router.RouteModeFromString(modeStr)
 		proxyAPIKey := ""
+		manualModelID := ""
 		if c.db != nil {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+			manualModelID, _ = c.db.GetConfig("manual_model_id")
 		}
-		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.proxy = proxy.NewWithManualModel(port, c.engine, routeMode, manualModelID, proxyAPIKey)
 		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			log.Printf("failed to restart proxy after model save: %v", err)
@@ -221,10 +223,12 @@ func (c *Core) DeleteModel(id string) error {
 		modeStr := c.getProxyModeLocked()
 		routeMode := router.RouteModeFromString(modeStr)
 		proxyAPIKey := ""
+		manualModelID := ""
 		if c.db != nil {
 			proxyAPIKey, _ = c.db.GetConfig("proxy_api_key")
+			manualModelID, _ = c.db.GetConfig("manual_model_id")
 		}
-		c.proxy = proxy.New(port, c.engine, routeMode, proxyAPIKey)
+		c.proxy = proxy.NewWithManualModel(port, c.engine, routeMode, manualModelID, proxyAPIKey)
 		c.wireProxyLogger()
 		if err := c.proxy.Start(); err != nil {
 			log.Printf("failed to restart proxy after model delete: %v", err)

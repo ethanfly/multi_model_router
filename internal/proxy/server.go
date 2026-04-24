@@ -53,13 +53,14 @@ type RequestLogEntry struct {
 // Server is a local HTTP proxy that accepts OpenAI-compatible and Anthropic-compatible
 // requests and routes them through the router engine.
 type Server struct {
-	port         int
-	router       Router
-	server       *http.Server
-	defaultMode  router.RouteMode
-	apiKey       string
-	httpClient   *http.Client
-	OnRequestLog func(entry *RequestLogEntry) // optional stats callback
+	port          int
+	router        Router
+	server        *http.Server
+	defaultMode   router.RouteMode
+	manualModelID string
+	apiKey        string
+	httpClient    *http.Client
+	OnRequestLog  func(entry *RequestLogEntry) // optional stats callback
 }
 
 // requestStats tracks metrics during response writing.
@@ -74,13 +75,18 @@ type requestStats struct {
 
 // New creates a new proxy Server listening on the given port with a default route mode.
 func New(port int, r Router, mode router.RouteMode, apiKey string) *Server {
+	return NewWithManualModel(port, r, mode, "", apiKey)
+}
+
+func NewWithManualModel(port int, r Router, mode router.RouteMode, manualModelID, apiKey string) *Server {
 	return &Server{
-		port:        port,
-		router:      r,
-		defaultMode: mode,
-		apiKey:      apiKey,
+		port:          port,
+		router:        r,
+		defaultMode:   mode,
+		manualModelID: manualModelID,
+		apiKey:        apiKey,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute,
+			Timeout: 30 * time.Minute,
 			Transport: &http.Transport{
 				DisableCompression: true,
 			},
@@ -436,6 +442,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		if h := r.Header.Get("X-Router-Mode"); h != "" {
 			mode = router.RouteModeFromString(h)
 		}
+		modelID := modelField
+		if mode == router.RouteManual && s.manualModelID != "" {
+			modelID = s.manualModelID
+		}
+		if mode == router.RouteManual && modelID == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "manual mode requires a selected model"})
+			return
+		}
 
 		type modelSelector interface {
 			SelectModel(ctx context.Context, req *router.RouteRequest) (*router.ModelConfig, int64, string)
@@ -449,7 +463,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		modelCfg, complexity, errMsg := selector.SelectModel(r.Context(), &router.RouteRequest{
 			Messages: nil,
 			Mode:     mode,
-			ModelID:  "",
+			ModelID:  modelID,
 		})
 		if modelCfg == nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": errMsg})
@@ -495,6 +509,21 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	if h := r.Header.Get("X-Router-Mode"); h != "" {
 		mode = router.RouteModeFromString(h)
 	}
+	modelID := modelField
+	if mode == router.RouteManual && s.manualModelID != "" {
+		modelID = s.manualModelID
+	}
+	if mode == router.RouteManual && modelID == "" {
+		if isAnthropic {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+				"type":  "error",
+				"error": map[string]string{"type": "api_error", "message": "manual mode requires a selected model"},
+			})
+		} else {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "manual mode requires a selected model"})
+		}
+		return
+	}
 
 	type modelSelector interface {
 		SelectModel(ctx context.Context, req *router.RouteRequest) (*router.ModelConfig, int64, string)
@@ -509,7 +538,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	routeReq := &router.RouteRequest{
 		Messages: providerMsgs,
 		Mode:     mode,
-		ModelID:  modelField,
+		ModelID:  modelID,
 	}
 	modelCfg, complexity, errMsg := selector.SelectModel(r.Context(), routeReq)
 	decisionSummary := ""
@@ -540,6 +569,8 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	convertToolsForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	convertToolChoiceForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	convertSystemForUpstream(reqMap, isAnthropic, isTargetAnthropic)
+	convertMessagesForUpstream(reqMap, isAnthropic, isTargetAnthropic)
+	preserveCompletionTokenLimit(reqMap, isTargetAnthropic)
 	sanitizeForProvider(reqMap, modelCfg.Provider)
 	stripThinkingBlocks(reqMap, isTargetAnthropic)
 	sanitizeNullContent(reqMap)
@@ -571,7 +602,6 @@ func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []
 		upstreamPath = "/messages"
 	} else {
 		upstreamPath = "/chat/completions"
-		// Inject stream_options to request OpenAI usage in streaming responses
 		body = injectStreamOptions(body)
 	}
 	targetURL := strings.TrimSuffix(modelCfg.BaseURL, "/") + upstreamPath
@@ -729,6 +759,10 @@ func injectStreamOptions(body []byte) []byte {
 	}
 	var m map[string]json.RawMessage
 	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	var stream bool
+	if raw, ok := m["stream"]; !ok || json.Unmarshal(raw, &stream) != nil || !stream {
 		return body
 	}
 	if _, ok := m["stream_options"]; ok {
@@ -1589,7 +1623,183 @@ func convertToolChoiceForUpstream(reqMap map[string]json.RawMessage, isSourceAnt
 	}
 }
 
-// ---- Provider Field Sanitization ----
+func preserveCompletionTokenLimit(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
+	if !isTargetAnthropic {
+		return
+	}
+	if _, hasMaxTokens := reqMap["max_tokens"]; hasMaxTokens {
+		return
+	}
+	raw, ok := reqMap["max_completion_tokens"]
+	if !ok {
+		return
+	}
+	var mt int
+	if json.Unmarshal(raw, &mt) == nil && mt > 0 {
+		reqMap["max_tokens"] = raw
+	}
+}
+
+func convertMessagesForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropic, isTargetAnthropic bool) {
+	msgsRaw, ok := reqMap["messages"]
+	if !ok {
+		return
+	}
+
+	var msgs []map[string]json.RawMessage
+	if json.Unmarshal(msgsRaw, &msgs) != nil {
+		return
+	}
+
+	modified := false
+	converted := make([]map[string]json.RawMessage, 0, len(msgs))
+	for _, msg := range msgs {
+		var role string
+		json.Unmarshal(msg["role"], &role)
+		switch {
+		case isTargetAnthropic && role == "assistant":
+			modified = convertOpenAIToolCallsForAnthropic(msg) || modified
+		case isTargetAnthropic && role == "tool":
+			msg["role"] = json.RawMessage(`"user"`)
+			msg["content"] = anthropicToolResultContent(msg)
+			delete(msg, "tool_call_id")
+			delete(msg, "name")
+			modified = true
+		case !isTargetAnthropic && role == "assistant":
+			modified = dropAnthropicOnlyContentBlocks(msg) || modified
+		case !isTargetAnthropic && role != "system" && role != "user" && role != "assistant" && role != "tool":
+			msg["role"] = json.RawMessage(`"user"`)
+			modified = true
+		}
+
+		converted = append(converted, msg)
+	}
+
+	if modified {
+		reqMap["messages"], _ = json.Marshal(converted)
+	}
+}
+
+func convertOpenAIToolCallsForAnthropic(msg map[string]json.RawMessage) bool {
+	toolCallsRaw, ok := msg["tool_calls"]
+	if !ok || len(toolCallsRaw) == 0 {
+		return false
+	}
+
+	var toolCalls []map[string]json.RawMessage
+	if json.Unmarshal(toolCallsRaw, &toolCalls) != nil || len(toolCalls) == 0 {
+		return false
+	}
+
+	var blocks []map[string]json.RawMessage
+	contentText := textFromRawMessage(msg["content"])
+	if contentText != "" {
+		textBlock := map[string]json.RawMessage{"type": json.RawMessage(`"text"`)}
+		textBlock["text"], _ = json.Marshal(contentText)
+		blocks = append(blocks, textBlock)
+	}
+
+	for _, call := range toolCalls {
+		fnRaw := call["function"]
+		if len(fnRaw) == 0 {
+			continue
+		}
+		var fn map[string]json.RawMessage
+		if json.Unmarshal(fnRaw, &fn) != nil {
+			continue
+		}
+		block := map[string]json.RawMessage{"type": json.RawMessage(`"tool_use"`)}
+		if id := call["id"]; len(id) > 0 {
+			block["id"] = id
+		}
+		if name := fn["name"]; len(name) > 0 {
+			block["name"] = name
+		}
+		block["input"] = json.RawMessage(`{}`)
+		if args := fn["arguments"]; len(args) > 0 {
+			var argsText string
+			if json.Unmarshal(args, &argsText) == nil && argsText != "" {
+				var input json.RawMessage
+				if json.Unmarshal([]byte(argsText), &input) == nil {
+					block["input"] = input
+				}
+			} else {
+				block["input"] = args
+			}
+		}
+		blocks = append(blocks, block)
+	}
+
+	if len(blocks) == 0 {
+		return false
+	}
+	msg["content"], _ = json.Marshal(blocks)
+	delete(msg, "tool_calls")
+	return true
+}
+
+func textFromRawMessage(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	return ""
+}
+
+func anthropicToolResultContent(msg map[string]json.RawMessage) json.RawMessage {
+	toolUseID := msg["tool_call_id"]
+	if len(toolUseID) == 0 {
+		toolUseID = msg["name"]
+	}
+
+	content := msg["content"]
+	if len(content) == 0 || string(content) == "null" {
+		content = json.RawMessage(`""`)
+	}
+
+	block := map[string]json.RawMessage{
+		"type":    json.RawMessage(`"tool_result"`),
+		"content": content,
+	}
+	if len(toolUseID) > 0 {
+		block["tool_use_id"] = toolUseID
+	}
+	blocks := []map[string]json.RawMessage{block}
+	out, _ := json.Marshal(blocks)
+	return out
+}
+
+func dropAnthropicOnlyContentBlocks(msg map[string]json.RawMessage) bool {
+	contentRaw := msg["content"]
+	if len(contentRaw) == 0 {
+		return false
+	}
+
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(contentRaw, &blocks) != nil {
+		return false
+	}
+
+	var textParts []string
+	for _, block := range blocks {
+		var blockType string
+		json.Unmarshal(block["type"], &blockType)
+		if blockType == "text" {
+			var text string
+			json.Unmarshal(block["text"], &text)
+			if text != "" {
+				textParts = append(textParts, text)
+			}
+		}
+	}
+
+	text := strings.Join(textParts, "")
+	msg["content"], _ = json.Marshal(text)
+	return true
+}
 
 // openAIFields are fields accepted by OpenAI-compatible chat completion APIs.
 var openAIFields = map[string]bool{
