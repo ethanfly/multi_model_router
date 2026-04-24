@@ -1,12 +1,13 @@
 # Multi-Model Router
 
-<!-- Banner -->
 <p align="center">
   <img src="build/icon.svg" alt="Multi-Model Router" width="128" style="border-radius: 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.3);"/>
 </p>
 
 <p align="center">
-  <strong>AI 模型智能路由代理</strong> — 自动根据请求复杂度选择最优模型，支持 OpenAI / Anthropic / Google / Ollama 等多平台
+  <strong>AI 模型智能路由代理</strong><br>
+  自动分析请求复杂度，从多个 AI 模型中选出最优解<br>
+  支持 OpenAI · Anthropic · Google · Ollama · 自定义兼容接口
 </p>
 
 <p align="center">
@@ -20,33 +21,74 @@
 
 ---
 
-## 功能特点
+## 这是什么？
 
-### 核心能力
+**Multi-Model Router** 是一个本地运行的 AI 模型路由代理。你接入多个 AI 模型后，它自动判断每个请求的复杂度——简单问候发给便宜模型，复杂编程发给强力模型——你只需要用同一个 API 地址。
 
-| 功能 | 说明 |
+### 三种运行形态
+
+| 形态 | 说明 |
 |------|------|
-| **多模型管理** | 统一管理多个 AI 模型，按推理/编程/创意/速度/性价比五维评分 |
-| **智能路由** | 自动 / 手动 / 竞速三种模式，零配置自动选择最优模型 |
-| **OpenAI 兼容代理** | 本地代理端口，现有工具零改造接入 |
-| **请求统计** | 实时统计 Token 消耗、延迟、模型使用量、复杂度分布 |
-| **导入 / 导出** | 模型配置加密导出，跨设备迁移 |
+| **桌面 GUI** | 完整可视化界面，管理模型、聊天测试、查看仪表盘 |
+| **终端 TUI** | 命令行交互界面，无需图形环境 |
+| **Headless 服务** | 纯后台代理，适合服务器部署 |
 
-### 多端支持
+---
 
-| 模式 | 说明 |
-|------|------|
-| **桌面 GUI** | Wails + Vue 3，可视化模型管理和仪表盘 |
-| **终端 TUI** | Bubble Tea 交互式管理，无需图形界面 |
-| **Headless CLI** | 服务器静默运行，仅提供代理服务 |
-| **系统托盘** | 关闭窗口最小化到托盘，后台常驻 |
+## 界面一览
 
-### 其他
+### 仪表盘
 
-- 中英双语界面
-- Windows 开机自启动
-- API Key AES-256-GCM 加密存储
-- 模型配置加密导入导出（PBKDF2 + AES-256-GCM）
+实时监控请求量、Token 消耗、延迟分布，以及每个模型的使用占比和请求复杂度分布。
+
+<p align="center">
+  <img src="screenshots/5.png" alt="仪表盘" width="90%"/>
+</p>
+
+### 智能聊天
+
+三种路由模式一键切换——自动模式零配置智能选模型，手动模式指定模型，竞速模式多模型并发取最快响应。
+
+<p align="center">
+  <img src="screenshots/2.png" alt="聊天界面" width="90%"/>
+</p>
+
+### 模型管理
+
+统一管理所有 AI 模型，五维评分（推理 / 编程 / 创意 / 速度 / 性价比），支持导入导出加密配置。
+
+<p align="center">
+  <img src="screenshots/1.png" alt="模型管理" width="90%"/>
+</p>
+
+<details>
+<summary>查看更多截图</summary>
+
+#### 添加模型
+
+配置 API 地址、密钥、模型 ID，自定义五维评分和速率限制。
+
+<p align="center">
+  <img src="screenshots/3.png" alt="添加模型" width="90%"/>
+</p>
+
+#### 路由规则
+
+自由定义关键词规则，决定什么内容算"简单"、什么算"编程"、什么算"复杂"——路由行为完全可控。
+
+<p align="center">
+  <img src="screenshots/4.png" alt="路由规则" width="90%"/>
+</p>
+
+#### 设置
+
+中英双语、开机自启、代理端口、API 密钥认证，集中配置。
+
+<p align="center">
+  <img src="screenshots/6.png" alt="设置" width="90%"/>
+</p>
+
+</details>
 
 ---
 
@@ -54,31 +96,28 @@
 
 ### 下载安装
 
-从 [Releases](https://github.com/ethanfly/multi_model_router/releases) 下载最新版本 `MultiModelRouter-v*.exe`，双击运行。
+从 [Releases](https://github.com/ethanfly/multi_model_router/releases) 下载最新 `MultiModelRouter-v*.exe`，双击运行即可。
 
-### 首次配置
-
-```
-侧边栏 模型 → 添加模型（名称 / 供应商 / API Key / 模型 ID）
-侧边栏 设置 → 配置端口 → 启动代理
-```
-
-### 接入使用
-
-将任意 OpenAI 兼容客户端的 API 地址改为：
+### 三步接入
 
 ```
-http://localhost:9680/v1
+1. 模型 → 添加模型（填入 API Key 和模型 ID）
+2. 设置 → 配置端口 → 启动代理
+3. 将客户端 API 地址改为 http://localhost:9680/v1
 ```
+
+随后所有 OpenAI 兼容客户端（ChatBox、Cursor、Continue、自定义代码等）都能直接使用，无需逐个配置模型。
 
 ---
 
 ## 代理 API
 
-### 认证方式
+完全兼容 OpenAI `/v1/chat/completions` 协议。
+
+### 认证
 
 ```bash
-# Authorization Bearer
+# Authorization Bearer（推荐）
 curl http://localhost:9680/v1/chat/completions \
   -H "Authorization: Bearer YOUR_PROXY_KEY" \
   -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
@@ -89,49 +128,49 @@ curl http://localhost:9680/v1/chat/completions \
   -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-不配置密钥则跳过认证（适合本地开发）。
+未配置密钥时跳过认证，适合本地开发环境。
 
 ### 路由控制
 
-| `model` 值 | 行为 |
+| `model` 参数 | 行为 |
 |-------------|------|
-| `"auto"` 或留空 | 使用默认路由模式 |
-| `"race"` | 强制竞速模式，所有模型竞争，最快响应胜出 |
-| `"gpt-4o"` 等具体名称 | 手动模式，强制路由到指定模型 |
+| `"auto"` 或留空 | 自动模式：根据请求复杂度智能选择模型 |
+| `"race"` | 竞速模式：所有启用模型并发请求，最快响应返回 |
+| `"gpt-4o"` 等具体名称 | 手动模式：直接路由到指定模型 |
 
-### 路由模式
+### 三种路由模式
 
-| 模式 | 说明 |
-|------|------|
-| `auto` | 根据请求复杂度（简单/中等/复杂）自动选择最合适的模型 |
-| `manual` | 需在请求中指定 `model` 为具体模型名称 |
-| `race` | 所有启用模型同时请求，最快响应被采用 |
+| 模式 | 原理 | 适用场景 |
+|------|------|------|
+| **自动 (auto)** | 关键词 + 规则匹配 → 判定复杂度（简单/中等/复杂）→ 按评分选模型 | 日常使用，零配置 |
+| **手动 (manual)** | 请求中指定 `model`，不走路由逻辑 | 需要特定模型能力 |
+| **竞速 (race)** | 所有启用模型同时请求，谁先返回用谁 | 对延迟敏感的场景 |
 
 ---
 
 ## 命令行
 
 ```bash
-# 查看帮助
+# 帮助
 MultiModelRouter.exe --help
 
-# 查看版本
+# 版本
 MultiModelRouter.exe version
 
-# Headless 代理模式（无 GUI，适合服务器）
+# Headless 代理（无 GUI，适合服务器）
 MultiModelRouter.exe serve --port 9680 --mode auto
 
-# TUI 交互模式（终端管理界面）
+# 终端交互界面
 MultiModelRouter.exe tui
 ```
 
-### CLI 子命令
+### 子命令
 
 | 命令 | 说明 | 参数 |
 |------|------|------|
-| `serve` | 启动无头代理服务器 | `-p, --port` 端口（默认 9680）<br>`-m, --mode` 路由模式<br>`-k, --api-key` 代理密钥 |
-| `tui` | 终端交互界面 | `-p, --port` 默认端口 |
-| `version` | 显示版本号 | — |
+| `serve` | 启动无头代理服务器 | `-p, --port` 端口（默认 9680）<br>`-m, --mode` 路由模式（auto/manual/race）<br>`-k, --api-key` 代理密钥 |
+| `tui` | 终端交互管理界面 | `-p, --port` 默认端口 |
+| `version` | 输出版本号 | — |
 
 ### TUI 快捷键
 
@@ -139,20 +178,9 @@ MultiModelRouter.exe tui
 |------|------|
 | `1` / `2` / `3` | 切换标签页（状态 / 模型 / 统计） |
 | `s` | 启动 / 停止代理 |
-| `r` | 重新加载模型 |
+| `r` | 重新加载模型列表 |
 | `↑` / `↓` | 列表导航 |
 | `q` / `Ctrl+C` | 退出 |
-
----
-
-## 界面预览
-
-<details>
-<summary>点击展开截图</summary>
-
-![应用截图](screenshot.png)
-
-</details>
 
 ---
 
@@ -162,36 +190,37 @@ MultiModelRouter.exe tui
 multi_model_router/
 ├── main.go                    # 入口：GUI / CLI 分发
 ├── app.go                     # Wails GUI 绑定层
-├── app_windows.go             # Windows 平台特定逻辑
+├── app_windows.go             # Windows 平台实现
 ├── app_unix.go                # Unix 平台存根
-├── trayicon.go                # 系统托盘图标生成
+├── trayicon.go                # 系统托盘图标
 │
 ├── frontend/                  # Vue 3 + TypeScript 前端
 │   └── src/
 │       ├── views/             # ChatView / DashboardView / ModelsView / RulesView / SettingsView
-│       ├── components/        # TitleBar / ModelCard / ModelEditor / MessageBubble / PasswordDialog / RouteDiagnosticsCard
-│       ├── stores/            # Pinia 状态管理（models）
+│       ├── components/        # TitleBar / ModelCard / ModelEditor / MessageBubble 等
+│       ├── stores/            # Pinia 状态管理
 │       └── i18n/              # 中英双语
 │
 ├── internal/
-│   ├── autostart/             # Windows 开机自启动
-│   ├── core/                  # 核心业务逻辑（独立于 GUI）
+│   ├── core/                  # 核心业务逻辑（GUI/CLI 共用）
 │   ├── cli/                   # CLI 命令（cobra）
 │   ├── tui/                   # 终端 UI（Bubble Tea）
-│   ├── config/                # 配置管理
-│   ├── db/                    # SQLite 数据库层 & 迁移
 │   ├── router/                # 路由引擎 & 请求复杂度分类器
 │   ├── provider/              # AI 供应商适配（OpenAI / Anthropic）
-│   ├── proxy/                 # HTTP 代理服务器（OpenAI 兼容）
+│   ├── proxy/                 # HTTP 代理服务器（OpenAI 兼容协议）
+│   ├── config/                # 配置管理
+│   ├── db/                    # SQLite 数据库 & 迁移
 │   ├── stats/                 # 请求统计收集
-│   ├── crypto/                # API Key 加密（AES-256-GCM）
+│   ├── crypto/                # API Key AES-256-GCM 加密
+│   ├── autostart/             # Windows 开机自启动
 │   └── wintray/               # Windows 系统托盘集成
 │
 ├── scripts/
 │   └── generate-icons.mjs     # SVG → PNG / ICO 图标生成
 │
 ├── docs/                      # 文档资源
-├── build/                     # 构建产物 & 图标资源
+├── build/                     # 构建产物 & 图标
+├── screenshots/               # 应用截图
 ├── build.bat                  # Windows 构建脚本
 └── build.sh                   # Linux/macOS 构建脚本
 ```
@@ -216,20 +245,20 @@ go install github.com/wailsapp/wails/v2/cmd/wails@latest
 ### 开发模式
 
 ```bash
-wails dev
+wails dev          # 启动热重载开发服务器
 ```
 
-### 构建发布
+### 构建
 
 ```bash
-# Windows 构建
-build.bat
+build.bat          # Windows
+./build.sh         # Linux / macOS
 
-# 或直接使用 Wails
+# 或直接
 wails build -clean -ldflags "-s -w"
 ```
 
-构建产物位于 `build/bin/MultiModelRouter.exe`。
+构建产物：`build/bin/MultiModelRouter.exe`
 
 ---
 
@@ -241,12 +270,12 @@ wails build -clean -ldflags "-s -w"
 | 后端语言 | Go 1.25 |
 | CLI 框架 | [Cobra](https://github.com/spf13/cobra) |
 | TUI 框架 | [Bubble Tea](https://github.com/charmbracelet/bubbletea) |
-| 数据库 | SQLite（modernc.org/sqlite，无 CGo） |
+| 数据库 | SQLite（[modernc.org/sqlite](https://modernc.org/sqlite)，纯 Go，无 CGo） |
 | 前端框架 | Vue 3 + TypeScript |
 | 状态管理 | Pinia |
 | 路由 | Vue Router 4 |
 | 国际化 | vue-i18n |
-| 加密 | golang.org/x/crypto |
+| 加密 | golang.org/x/crypto（AES-256-GCM / PBKDF2） |
 
 ---
 
