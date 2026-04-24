@@ -456,7 +456,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.forwardRawRequest(w, r, body, modelCfg, complexity, mode)
+		s.forwardRawRequest(w, r, body, modelCfg, complexity, mode, isAnthropic)
 		return
 	}
 
@@ -546,17 +546,17 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	ensureMaxTokens(reqMap, isTargetAnthropic)
 	upstreamBody, _ := json.Marshal(reqMap)
 
-	s.forwardUpstream(w, r, upstreamBody, modelCfg, complexity, mode, decisionSummary, decisionJSON)
+	s.forwardUpstream(w, r, upstreamBody, modelCfg, complexity, mode, decisionSummary, decisionJSON, isAnthropic)
 }
 
 // forwardRawRequest forwards the raw body bytes without any JSON manipulation.
-func (s *Server) forwardRawRequest(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode) {
-	s.forwardUpstream(w, r, body, modelCfg, complexity, mode, "", "")
+func (s *Server) forwardRawRequest(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, isSourceAnthropic bool) {
+	s.forwardUpstream(w, r, body, modelCfg, complexity, mode, "", "", isSourceAnthropic)
 }
 
 // forwardUpstream sends the prepared body to the upstream provider and streams
 // the response back to the client while extracting token usage.
-func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, decisionSummary, decisionJSON string) {
+func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, decisionSummary, decisionJSON string, isSourceAnthropic bool) {
 	w.Header().Set("X-Router-Model", modelCfg.Name)
 	w.Header().Set("X-Router-Complexity", fmt.Sprintf("%d", complexity))
 	if decisionSummary != "" {
@@ -640,36 +640,74 @@ func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []
 		return
 	}
 
-	// Copy response headers from upstream (Content-Length stripped to avoid mismatch)
-	copyResponseHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-
 	flusher, canFlush := w.(http.Flusher)
 	var totalBytes int
 
-	if isStreaming {
-		// For streaming responses, parse SSE lines for token usage while forwarding
-		if isTargetAnthropic {
-			totalBytes = s.streamAndTrackAnthropic(w, flusher, canFlush, buf, firstN, firstErr, resp.Body, &rs)
-		} else {
-			totalBytes = s.streamAndTrackOpenAI(w, flusher, canFlush, buf, firstN, firstErr, resp.Body, &rs)
+	if resp.StatusCode < 400 && isSourceAnthropic != isTargetAnthropic {
+		if isStreaming {
+			stream := parseUpstreamStream(bytes.NewReader(buf[:firstN]), firstErr, resp.Body, isTargetAnthropic, modelCfg.ModelID)
+			result := &router.RouteResult{ModelName: modelCfg.Name, Provider: modelCfg.Provider, Status: "success", Stream: stream}
+			if isSourceAnthropic {
+				s.writeAnthropicStream(w, result, &rs)
+			} else {
+				s.writeOpenAIStream(w, result, &rs)
+			}
+			s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+			return
 		}
-	} else {
-		// For non-streaming responses, read full body and extract usage
+
 		var responseBody []byte
 		if firstN > 0 {
 			responseBody = append(responseBody, buf[:firstN]...)
 		}
 		remaining, _ := io.ReadAll(resp.Body)
 		responseBody = append(responseBody, remaining...)
-		totalBytes = len(responseBody)
-
-		// Extract usage from non-streaming response
-		s.extractUsageFromJSON(responseBody, isTargetAnthropic, &rs)
-
-		w.Write(responseBody)
+		convertedBody, err := convertNonStreamingResponse(responseBody, isTargetAnthropic, modelCfg.Name)
+		if err != nil {
+			log.Printf("failed to convert upstream response from %s for %s: %v", modelCfg.Provider, r.URL.Path, err)
+			rs.status = "error"
+			rs.errMsg = err.Error()
+			writeJSON(w, http.StatusBadGateway, protocolErrorBody(isSourceAnthropic, err.Error()))
+			s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+			return
+		}
+		s.extractUsageFromJSON(convertedBody, isSourceAnthropic, &rs)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(convertedBody)
 		if canFlush {
 			flusher.Flush()
+		}
+		totalBytes = len(convertedBody)
+	} else {
+		// Copy response headers from upstream (Content-Length stripped to avoid mismatch)
+		copyResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+
+		if isStreaming {
+			// For streaming responses, parse SSE lines for token usage while forwarding
+			if isTargetAnthropic {
+				totalBytes = s.streamAndTrackAnthropic(w, flusher, canFlush, buf, firstN, firstErr, resp.Body, &rs)
+			} else {
+				totalBytes = s.streamAndTrackOpenAI(w, flusher, canFlush, buf, firstN, firstErr, resp.Body, &rs)
+			}
+		} else {
+			// For non-streaming responses, read full body and extract usage
+			var responseBody []byte
+			if firstN > 0 {
+				responseBody = append(responseBody, buf[:firstN]...)
+			}
+			remaining, _ := io.ReadAll(resp.Body)
+			responseBody = append(responseBody, remaining...)
+			totalBytes = len(responseBody)
+
+			// Extract usage from non-streaming response
+			s.extractUsageFromJSON(responseBody, isTargetAnthropic, &rs)
+
+			w.Write(responseBody)
+			if canFlush {
+				flusher.Flush()
+			}
 		}
 	}
 
@@ -796,6 +834,257 @@ func (s *Server) streamAndTrackAnthropic(w http.ResponseWriter, flusher http.Flu
 
 	_ = firstErr
 	return totalBytes
+}
+
+func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, isAnthropic bool, model string) <-chan provider.StreamChunk {
+	out := make(chan provider.StreamChunk, 64)
+	go func() {
+		defer close(out)
+		defer body.Close()
+
+		reader := io.MultiReader(first, body)
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		var inputTokens int
+		var contentReceived bool
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if !isAnthropic && data == "[DONE]" {
+				out <- provider.StreamChunk{Done: true, Model: model}
+				return
+			}
+
+			if isAnthropic {
+				var event struct {
+					Type    string `json:"type"`
+					Message *struct {
+						Model string `json:"model"`
+						Usage *struct {
+							InputTokens int `json:"input_tokens"`
+						} `json:"usage"`
+					} `json:"message"`
+					Delta *struct {
+						Text string `json:"text"`
+					} `json:"delta"`
+					Usage *struct {
+						OutputTokens int `json:"output_tokens"`
+					} `json:"usage"`
+				}
+				if json.Unmarshal([]byte(data), &event) != nil {
+					continue
+				}
+				switch event.Type {
+				case "message_start":
+					if event.Message != nil {
+						if event.Message.Model != "" {
+							model = event.Message.Model
+						}
+						if event.Message.Usage != nil {
+							inputTokens = event.Message.Usage.InputTokens
+						}
+					}
+				case "content_block_delta":
+					if event.Delta != nil && event.Delta.Text != "" {
+						out <- provider.StreamChunk{Content: event.Delta.Text, Model: model}
+						contentReceived = true
+					}
+				case "message_delta":
+					usage := &provider.Usage{InputTokens: inputTokens}
+					if event.Usage != nil {
+						usage.OutputTokens = event.Usage.OutputTokens
+					}
+					out <- provider.StreamChunk{Usage: usage, Model: model}
+				case "message_stop":
+					out <- provider.StreamChunk{Done: true, Model: model}
+					return
+				}
+				continue
+			}
+
+			var resp struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
+				} `json:"choices"`
+				Model string `json:"model"`
+				Usage *struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+				} `json:"usage"`
+			}
+			if json.Unmarshal([]byte(data), &resp) != nil {
+				continue
+			}
+			if resp.Model != "" {
+				model = resp.Model
+			}
+			if resp.Usage != nil {
+				out <- provider.StreamChunk{Usage: &provider.Usage{InputTokens: resp.Usage.PromptTokens, OutputTokens: resp.Usage.CompletionTokens}, Model: model}
+			}
+			for _, choice := range resp.Choices {
+				if choice.Delta.Content != "" {
+					out <- provider.StreamChunk{Content: choice.Delta.Content, Model: model}
+					contentReceived = true
+				}
+				if choice.FinishReason != nil {
+					out <- provider.StreamChunk{Done: true, Model: model}
+					return
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			out <- provider.StreamChunk{Error: fmt.Errorf("stream read error: %w", err), Done: true, Model: model}
+			return
+		}
+		if firstErr != nil && firstErr != io.EOF {
+			out <- provider.StreamChunk{Error: fmt.Errorf("stream read error: %w", firstErr), Done: true, Model: model}
+			return
+		}
+		if !contentReceived {
+			out <- provider.StreamChunk{Error: fmt.Errorf("stream ended without any content"), Done: true, Model: model}
+			return
+		}
+		out <- provider.StreamChunk{Done: true, Model: model}
+	}()
+	return out
+}
+
+func convertNonStreamingResponse(body []byte, isUpstreamAnthropic bool, modelName string) ([]byte, error) {
+	if isUpstreamAnthropic {
+		content, usage, err := parseAnthropicNonStreaming(body)
+		if err != nil {
+			return nil, err
+		}
+		resp := map[string]interface{}{
+			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   modelName,
+			"choices": []map[string]interface{}{{
+				"index":         0,
+				"message":       map[string]interface{}{"role": "assistant", "content": content},
+				"finish_reason": "stop",
+			}},
+		}
+		if usage != nil {
+			resp["usage"] = map[string]int{
+				"prompt_tokens":     usage.InputTokens,
+				"completion_tokens": usage.OutputTokens,
+				"total_tokens":      usage.InputTokens + usage.OutputTokens,
+			}
+		}
+		return json.Marshal(resp)
+	}
+
+	content, usage, err := parseOpenAINonStreaming(body)
+	if err != nil {
+		return nil, err
+	}
+	resp := map[string]interface{}{
+		"id":            fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		"type":          "message",
+		"role":          "assistant",
+		"model":         modelName,
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"content":       []map[string]string{{"type": "text", "text": content}},
+		"usage":         map[string]int{"input_tokens": 0, "output_tokens": 0},
+	}
+	if usage != nil {
+		resp["usage"] = map[string]int{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens}
+	}
+	return json.Marshal(resp)
+}
+
+func parseOpenAINonStreaming(body []byte) (string, *provider.Usage, error) {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content interface{} `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", nil, fmt.Errorf("decode OpenAI response: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", nil, fmt.Errorf("OpenAI response missing choices")
+	}
+	content := textFromContent(resp.Choices[0].Message.Content)
+	usage := (*provider.Usage)(nil)
+	if resp.Usage != nil {
+		usage = &provider.Usage{InputTokens: resp.Usage.PromptTokens, OutputTokens: resp.Usage.CompletionTokens}
+	}
+	return content, usage, nil
+}
+
+func parseAnthropicNonStreaming(body []byte) (string, *provider.Usage, error) {
+	var resp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", nil, fmt.Errorf("decode Anthropic response: %w", err)
+	}
+	var parts []string
+	for _, block := range resp.Content {
+		if block.Type == "text" && block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	usage := (*provider.Usage)(nil)
+	if resp.Usage != nil {
+		usage = &provider.Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens}
+	}
+	return strings.Join(parts, ""), usage, nil
+}
+
+func textFromContent(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var parts []string
+		for _, part := range v {
+			m, ok := part.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if m["type"] == "text" {
+				if text, ok := m["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	default:
+		return ""
+	}
+}
+
+func protocolErrorBody(isAnthropic bool, message string) map[string]interface{} {
+	if isAnthropic {
+		return map[string]interface{}{"type": "error", "error": map[string]string{"type": "api_error", "message": message}}
+	}
+	return map[string]interface{}{"error": map[string]string{"type": "api_error", "message": message}}
 }
 
 // extractUsageFromJSON parses usage from a non-streaming response body.

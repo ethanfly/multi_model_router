@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"multi_model_router/internal/router"
@@ -562,6 +563,100 @@ func TestHandleChatCompletion_SetsDecisionHeaderFromDiagnostics(t *testing.T) {
 	}
 	if got := rr.Header().Get("X-Router-Decision"); got != diagnostics.Summary {
 		t.Fatalf("expected decision header %q, got %q", diagnostics.Summary, got)
+	}
+}
+
+func TestHandleChatCompletion_ConvertsOpenAINonStreamResponseForAnthropicClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("expected OpenAI upstream path, got %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_123","object":"chat.completion","model":"gpt-4.1-mini","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}`))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Fast",
+		Provider: "openai",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "gpt-4.1-mini",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"auto","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("expected valid Anthropic JSON, got %v body=%s", err, rr.Body.String())
+	}
+	if got.Type != "message" || got.Role != "assistant" {
+		t.Fatalf("expected Anthropic message response, got type=%q role=%q", got.Type, got.Role)
+	}
+	if len(got.Content) != 1 || got.Content[0].Type != "text" || got.Content[0].Text != "ok" {
+		t.Fatalf("unexpected content: %+v", got.Content)
+	}
+	if got.Usage.InputTokens != 7 || got.Usage.OutputTokens != 2 {
+		t.Fatalf("unexpected usage: %+v", got.Usage)
+	}
+}
+
+func TestHandleChatCompletion_ConvertsOpenAIStreamResponseForAnthropicClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}],\"model\":\"gpt-4.1-mini\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"model\":\"gpt-4.1-mini\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Fast",
+		Provider: "openai",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "gpt-4.1-mini",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"auto","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "event: message_start") || !strings.Contains(body, "event: content_block_delta") || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("expected Anthropic SSE events, got %s", body)
+	}
+	if !strings.Contains(body, `"text":"ok"`) {
+		t.Fatalf("expected converted text delta, got %s", body)
 	}
 }
 
