@@ -173,6 +173,49 @@ func (a *App) TestModel(m core.ModelJSON) string {
 	return result
 }
 
+func (a *App) ExportModels(password string) (string, error) {
+	return a.core.ExportModels(password)
+}
+
+func (a *App) ImportModels(jsonData, password string) (string, error) {
+	count, err := a.core.ImportModels(jsonData, password)
+	if err != nil {
+		return fmt.Sprintf("%d", count), err
+	}
+	return fmt.Sprintf("%d", count), nil
+}
+
+// SaveExportFile opens a save dialog and writes the export JSON to the chosen file.
+func (a *App) SaveExportFile(jsonData string) error {
+	filePath, err := wailsRuntime.SaveFileDialog(a.ctx, wailsRuntime.SaveDialogOptions{
+		DefaultFilename: "models_export.json",
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "JSON Files", Pattern: "*.json"},
+		},
+	})
+	if err != nil || filePath == "" {
+		return fmt.Errorf("no file selected")
+	}
+	return os.WriteFile(filePath, []byte(jsonData), 0644)
+}
+
+// ReadImportFile opens a file dialog and returns the file content.
+func (a *App) ReadImportFile() (string, error) {
+	filePath, err := wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Filters: []wailsRuntime.FileFilter{
+			{DisplayName: "JSON Files", Pattern: "*.json"},
+		},
+	})
+	if err != nil || filePath == "" {
+		return "", fmt.Errorf("no file selected")
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	return string(data), nil
+}
+
 // SendChat routes a chat request through the engine and streams results back
 // to the frontend via Wails events.
 func (a *App) SendChat(req core.ChatRequest) core.ChatResponse {

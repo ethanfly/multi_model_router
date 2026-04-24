@@ -23,7 +23,7 @@ type statsTab struct {
 	tokensOut      int
 	avgLatency     float64
 	modelUsage     []stats.ModelUsage
-	complexityDist map[string]int64
+	complexityDist map[string]float64
 	recentLogs     []stats.RecentLog
 	cursor         int
 }
@@ -42,7 +42,7 @@ func refreshStats(c *core.Core) tea.Cmd {
 		lat, _ := data["avg_latency"].(float64)
 
 		mu, _ := data["model_usage"].([]stats.ModelUsage)
-		cd, _ := data["complexity_dist"].(map[string]int64)
+		cd, _ := data["complexity_dist"].(map[string]float64)
 		rl, _ := data["recent_logs"].([]stats.RecentLog)
 
 		return statsDataMsg{
@@ -128,7 +128,7 @@ func (t statsTab) View(width int) string {
 		sort.Strings(cks)
 		for _, k := range cks {
 			v := t.complexityDist[k]
-			b.WriteString(fmt.Sprintf("  %-12s %d\n", k+":", v))
+			b.WriteString(fmt.Sprintf("  %-12s %.1f%%\n", k+":", v))
 		}
 	}
 

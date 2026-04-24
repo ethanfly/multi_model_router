@@ -6,6 +6,10 @@ export function DeleteModel(arg1) {
   return window['go']['main']['App']['DeleteModel'](arg1);
 }
 
+export function ExportModels(arg1) {
+  return window['go']['main']['App']['ExportModels'](arg1);
+}
+
 export function GetActiveModels() {
   return window['go']['main']['App']['GetActiveModels']();
 }
@@ -50,6 +54,10 @@ export function HideWindow() {
   return window['go']['main']['App']['HideWindow']();
 }
 
+export function ImportModels(arg1, arg2) {
+  return window['go']['main']['App']['ImportModels'](arg1, arg2);
+}
+
 export function IsWindowMaximized() {
   return window['go']['main']['App']['IsWindowMaximized']();
 }
@@ -60,6 +68,14 @@ export function MinimizeWindow() {
 
 export function QuitApp() {
   return window['go']['main']['App']['QuitApp']();
+}
+
+export function ReadImportFile() {
+  return window['go']['main']['App']['ReadImportFile']();
+}
+
+export function SaveExportFile(arg1) {
+  return window['go']['main']['App']['SaveExportFile'](arg1);
 }
 
 export function SaveModel(arg1) {

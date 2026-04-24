@@ -76,7 +76,19 @@
     "manualModelDesc": "选择手动模式下使用的模型",
     "proxyApiKey": "代理 API 密钥",
     "proxyApiKeyDesc": "访问代理接口时需要携带的密钥，留空则不校验",
-    "proxyApiKeyHint": "通过 Authorization: Bearer <key> 或 x-api-key 头传入"
+    "proxyApiKeyHint": "通过 Authorization: Bearer <key> 或 x-api-key 头传入",
+    "exportModels": "导出",
+    "importModels": "导入",
+    "exportPassword": "设置导出密码",
+    "exportPasswordHint": "此密码用于加密导出文件中的 API 密钥。",
+    "importPassword": "输入导入密码",
+    "importPasswordHint": "请输入导出时设置的密码。",
+    "passwordMismatch": "两次输入的密码不一致",
+    "exportSuccess": "模型导出成功！",
+    "importSuccess": "成功导入 {0} 个模型！",
+    "importError": "导入失败：密码错误或文件无效。",
+    "confirmPassword": "确认密码",
+    "noModelsToExport": "没有可导出的模型。"
   },
   "titlebar": {
     "minimize": "最小化",

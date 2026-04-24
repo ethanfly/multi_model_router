@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -272,4 +273,147 @@ func (c *Core) LogRequest(log *stats.RequestLog) error {
 		return nil
 	}
 	return c.collector.LogRequest(log)
+}
+
+// exportFile is the JSON structure for model export/import.
+type exportFile struct {
+	Version    int           `json:"version"`
+	ExportedAt string        `json:"exported_at"`
+	Models     []exportModel `json:"models"`
+}
+
+type exportModel struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Provider       string `json:"provider"`
+	BaseURL        string `json:"base_url"`
+	APIKey         string `json:"api_key"`
+	ModelID        string `json:"model_id"`
+	Reasoning      int    `json:"reasoning"`
+	Coding         int    `json:"coding"`
+	Creativity     int    `json:"creativity"`
+	Speed          int    `json:"speed"`
+	CostEfficiency int    `json:"cost_efficiency"`
+	MaxRPM         int    `json:"max_rpm"`
+	MaxTPM         int    `json:"max_tpm"`
+	IsActive       bool   `json:"is_active"`
+}
+
+// ExportModels exports all models as a JSON string with API keys encrypted by password.
+func (c *Core) ExportModels(password string) (string, error) {
+	if c.db == nil {
+		return "", fmt.Errorf("database not initialized")
+	}
+
+	rows, err := c.db.Query(
+		`SELECT id, name, provider, base_url, api_key, model_id,
+		        reasoning, coding, creativity, speed, cost_efficiency,
+		        max_rpm, max_tpm, is_active
+		 FROM models ORDER BY name`,
+	)
+	if err != nil {
+		return "", fmt.Errorf("query models: %w", err)
+	}
+	defer rows.Close()
+
+	var models []exportModel
+	for rows.Next() {
+		var em exportModel
+		var isActive int
+		var encryptedKey string
+		if err := rows.Scan(
+			&em.ID, &em.Name, &em.Provider, &em.BaseURL, &encryptedKey, &em.ModelID,
+			&em.Reasoning, &em.Coding, &em.Creativity, &em.Speed, &em.CostEfficiency,
+			&em.MaxRPM, &em.MaxTPM, &isActive,
+		); err != nil {
+			continue
+		}
+		em.IsActive = isActive == 1
+
+		// Decrypt with machine key, then re-encrypt with user password
+		if encryptedKey != "" {
+			plain, err := crypto.Decrypt(encryptedKey)
+			if err != nil {
+				continue
+			}
+			enc, err := crypto.EncryptWithPassword(plain, password)
+			if err != nil {
+				continue
+			}
+			em.APIKey = enc
+		}
+
+		models = append(models, em)
+	}
+
+	if len(models) == 0 {
+		return "", fmt.Errorf("no models to export")
+	}
+
+	data := exportFile{
+		Version:    1,
+		ExportedAt: time.Now().Format(time.RFC3339),
+		Models:     models,
+	}
+
+	b, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal export: %w", err)
+	}
+	return string(b), nil
+}
+
+// ImportModels imports models from a JSON string, decrypting API keys with password.
+func (c *Core) ImportModels(jsonData, password string) (int, error) {
+	if c.db == nil {
+		return 0, fmt.Errorf("database not initialized")
+	}
+
+	var data exportFile
+	if err := json.Unmarshal([]byte(jsonData), &data); err != nil {
+		return 0, fmt.Errorf("parse import file: %w", err)
+	}
+	if data.Version != 1 {
+		return 0, fmt.Errorf("unsupported export version: %d", data.Version)
+	}
+
+	imported := 0
+	for _, em := range data.Models {
+		// Decrypt API key from export password
+		apiKey := ""
+		if em.APIKey != "" {
+			plain, err := crypto.DecryptWithPassword(em.APIKey, password)
+			if err != nil {
+				return imported, fmt.Errorf("decrypt API key for %s: %w", em.Name, err)
+			}
+			apiKey = plain
+		}
+
+		// Generate new ID to avoid collisions
+		newID := router.NewUUID()
+
+		m := ModelJSON{
+			ID:             newID,
+			Name:           em.Name,
+			Provider:       em.Provider,
+			BaseURL:        em.BaseURL,
+			APIKey:         apiKey,
+			ModelID:        em.ModelID,
+			Reasoning:      em.Reasoning,
+			Coding:         em.Coding,
+			Creativity:     em.Creativity,
+			Speed:          em.Speed,
+			CostEfficiency: em.CostEfficiency,
+			MaxRPM:         em.MaxRPM,
+			MaxTPM:         em.MaxTPM,
+			IsActive:       em.IsActive,
+		}
+
+		if err := c.SaveModel(m); err != nil {
+			return imported, fmt.Errorf("save imported model %s: %w", em.Name, err)
+		}
+		imported++
+	}
+
+	return imported, nil
 }

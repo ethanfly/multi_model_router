@@ -4,6 +4,8 @@ import {
   GetModels,
   SaveModel,
   DeleteModel,
+  ExportModels,
+  ImportModels,
 } from '../../wailsjs/go/main/App'
 import { core } from '../../wailsjs/go/models'
 
@@ -44,7 +46,17 @@ export const useModelsStore = defineStore('models', () => {
     }
   }
 
-  return { models, loading, fetchModels, save, remove }
+  async function exportModels(password: string): Promise<string> {
+    return await ExportModels(password)
+  }
+
+  async function importModels(jsonData: string, password: string): Promise<string> {
+    const result = await ImportModels(jsonData, password)
+    await fetchModels()
+    return result
+  }
+
+  return { models, loading, fetchModels, save, remove, exportModels, importModels }
 })
 
 export type { Model }

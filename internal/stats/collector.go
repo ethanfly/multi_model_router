@@ -129,13 +129,13 @@ func (c *Collector) GetModelUsage(date time.Time) ([]ModelUsage, error) {
 	return results, nil
 }
 
-// GetComplexityDistribution returns counts grouped by complexity level for the given date.
-// It always returns keys "simple", "medium", "complex" with zero as default.
-func (c *Collector) GetComplexityDistribution(date time.Time) (map[string]int64, error) {
+// GetComplexityDistribution returns percentage distribution grouped by complexity level.
+// It always returns keys "simple", "medium", "complex" with 0 as default.
+func (c *Collector) GetComplexityDistribution(date time.Time) (map[string]float64, error) {
 	start := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
 	end := start.Add(24 * time.Hour)
 
-	dist := map[string]int64{
+	dist := map[string]float64{
 		"simple":  0,
 		"medium":  0,
 		"complex": 0,
@@ -153,21 +153,30 @@ func (c *Collector) GetComplexityDistribution(date time.Time) (map[string]int64,
 	}
 	defer rows.Close()
 
+	var total int64
 	for rows.Next() {
 		var complexity string
 		var count int64
 		if err := rows.Scan(&complexity, &count); err != nil {
 			return nil, fmt.Errorf("scan complexity: %w", err)
 		}
+		total += count
 		// Normalize: map unknown values to "medium".
 		key := complexity
 		if _, ok := dist[key]; !ok {
 			key = "medium"
 		}
-		dist[key] += count
+		dist[key] += float64(count)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate complexity: %w", err)
+	}
+
+	// Convert counts to percentages
+	if total > 0 {
+		for k := range dist {
+			dist[k] = dist[k] / float64(total) * 100
+		}
 	}
 
 	return dist, nil

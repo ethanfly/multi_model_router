@@ -4,6 +4,8 @@ import {core} from '../models';
 
 export function DeleteModel(arg1:string):Promise<void>;
 
+export function ExportModels(arg1:string):Promise<string>;
+
 export function GetActiveModels():Promise<string>;
 
 export function GetAutoStart():Promise<boolean>;
@@ -26,11 +28,17 @@ export function GetProxyStatus():Promise<Record<string, any>>;
 
 export function HideWindow():Promise<void>;
 
+export function ImportModels(arg1:string,arg2:string):Promise<string>;
+
 export function IsWindowMaximized():Promise<boolean>;
 
 export function MinimizeWindow():Promise<void>;
 
 export function QuitApp():Promise<void>;
+
+export function ReadImportFile():Promise<string>;
+
+export function SaveExportFile(arg1:string):Promise<void>;
 
 export function SaveModel(arg1:core.ModelJSON):Promise<void>;
 

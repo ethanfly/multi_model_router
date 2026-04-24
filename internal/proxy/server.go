@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -553,7 +554,7 @@ func (s *Server) forwardRawRequest(w http.ResponseWriter, r *http.Request, body 
 }
 
 // forwardUpstream sends the prepared body to the upstream provider and streams
-// the response back to the client byte-for-byte.
+// the response back to the client while extracting token usage.
 func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, decisionSummary, decisionJSON string) {
 	w.Header().Set("X-Router-Model", modelCfg.Name)
 	w.Header().Set("X-Router-Complexity", fmt.Sprintf("%d", complexity))
@@ -561,12 +562,16 @@ func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []
 		w.Header().Set("X-Router-Decision", decisionSummary)
 	}
 
+	isTargetAnthropic := modelCfg.Provider == "anthropic"
+
 	// Build upstream URL based on provider type
 	var upstreamPath string
-	if modelCfg.Provider == "anthropic" {
+	if isTargetAnthropic {
 		upstreamPath = "/messages"
 	} else {
 		upstreamPath = "/chat/completions"
+		// Inject stream_options to request OpenAI usage in streaming responses
+		body = injectStreamOptions(body)
 	}
 	targetURL := strings.TrimSuffix(modelCfg.BaseURL, "/") + upstreamPath
 
@@ -618,12 +623,14 @@ func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []
 		log.Printf("upstream %d from %s (model=%s): %s", resp.StatusCode, targetURL, modelCfg.ModelID, bodyPreview)
 	}
 
+	contentType := resp.Header.Get("Content-Type")
+	isStreaming := strings.Contains(contentType, "text/event-stream")
+
 	// Read first chunk to detect empty responses before committing status code
 	buf := make([]byte, 32*1024)
 	firstN, firstErr := resp.Body.Read(buf)
 
 	if firstN == 0 && firstErr != nil && resp.StatusCode < 400 {
-		// Upstream returned success status but empty body — return 502 so client retries
 		log.Printf("upstream returned %d with empty body url=%s", resp.StatusCode, targetURL)
 		rs.status = "error"
 		rs.errMsg = "upstream returned empty response"
@@ -636,9 +643,77 @@ func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
-	// Write first chunk and stream remaining body
 	flusher, canFlush := w.(http.Flusher)
 	var totalBytes int
+
+	if isStreaming {
+		// For streaming responses, parse SSE lines for token usage while forwarding
+		if isTargetAnthropic {
+			totalBytes = s.streamAndTrackAnthropic(w, flusher, canFlush, buf, firstN, firstErr, resp.Body, &rs)
+		} else {
+			totalBytes = s.streamAndTrackOpenAI(w, flusher, canFlush, buf, firstN, firstErr, resp.Body, &rs)
+		}
+	} else {
+		// For non-streaming responses, read full body and extract usage
+		var responseBody []byte
+		if firstN > 0 {
+			responseBody = append(responseBody, buf[:firstN]...)
+		}
+		remaining, _ := io.ReadAll(resp.Body)
+		responseBody = append(responseBody, remaining...)
+		totalBytes = len(responseBody)
+
+		// Extract usage from non-streaming response
+		s.extractUsageFromJSON(responseBody, isTargetAnthropic, &rs)
+
+		w.Write(responseBody)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	log.Printf("upstream response: status=%d bytes=%d tokens_in=%d tokens_out=%d url=%s",
+		resp.StatusCode, totalBytes, rs.tokensIn, rs.tokensOut, targetURL)
+
+	if resp.StatusCode >= 400 {
+		rs.status = "error"
+	} else {
+		rs.status = "success"
+	}
+	s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+}
+
+// injectStreamOptions adds stream_options with include_usage to OpenAI requests.
+func injectStreamOptions(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	if _, ok := m["stream_options"]; ok {
+		return body // already set
+	}
+	m["stream_options"], _ = json.Marshal(map[string]bool{"include_usage": true})
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// streamAndTrackOpenAI reads an OpenAI SSE stream, forwards it to the client,
+// and extracts token usage from chunks that contain it.
+func (s *Server) streamAndTrackOpenAI(w http.ResponseWriter, flusher http.Flusher, canFlush bool, buf []byte, firstN int, firstErr error, body io.Reader, rs *requestStats) int {
+	totalBytes := 0
+	reader := io.MultiReader(
+		bytes.NewReader(buf[:firstN]),
+		body,
+	)
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 	if firstN > 0 {
 		totalBytes += firstN
 		w.Write(buf[:firstN])
@@ -647,29 +722,122 @@ func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []
 		}
 	}
 
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			totalBytes += n
-			w.Write(buf[:n])
-			if canFlush {
-				flusher.Flush()
+	for scanner.Scan() {
+		line := scanner.Text()
+		totalBytes += len(line) + 1 // +1 for newline
+		fmt.Fprintln(w, line)
+		if canFlush {
+			flusher.Flush()
+		}
+
+		// Parse SSE data line for usage
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				continue
+			}
+			var chunk struct {
+				Usage *struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte(data), &chunk); err == nil && chunk.Usage != nil {
+				rs.tokensIn = chunk.Usage.PromptTokens
+				rs.tokensOut = chunk.Usage.CompletionTokens
 			}
 		}
-		if readErr != nil {
-			break
+	}
+
+	_ = firstErr // scanner already consumed via MultiReader
+	return totalBytes
+}
+
+// streamAndTrackAnthropic reads an Anthropic SSE stream, forwards it to the client,
+// and extracts input/output tokens from message_start and message_delta events.
+func (s *Server) streamAndTrackAnthropic(w http.ResponseWriter, flusher http.Flusher, canFlush bool, buf []byte, firstN int, firstErr error, body io.Reader, rs *requestStats) int {
+	totalBytes := 0
+	reader := io.MultiReader(
+		bytes.NewReader(buf[:firstN]),
+		body,
+	)
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	if firstN > 0 {
+		totalBytes += firstN
+		w.Write(buf[:firstN])
+		if canFlush {
+			flusher.Flush()
 		}
 	}
 
-	log.Printf("upstream response: status=%d bytes=%d content-type=%s url=%s",
-		resp.StatusCode, totalBytes, resp.Header.Get("Content-Type"), targetURL)
+	for scanner.Scan() {
+		line := scanner.Text()
+		totalBytes += len(line) + 1
+		fmt.Fprintln(w, line)
+		if canFlush {
+			flusher.Flush()
+		}
 
-	if resp.StatusCode >= 400 {
-		rs.status = "error"
-	} else {
-		rs.status = "success"
+		// Parse SSE data line for Anthropic events
+		if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			var event struct {
+				Type    string `json:"type"`
+				Message *struct {
+					Usage *struct {
+						InputTokens int `json:"input_tokens"`
+					} `json:"usage"`
+				} `json:"message"`
+				Usage *struct {
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
+			}
+			if err := json.Unmarshal([]byte(data), &event); err == nil {
+				switch event.Type {
+				case "message_start":
+					if event.Message != nil && event.Message.Usage != nil {
+						rs.tokensIn = event.Message.Usage.InputTokens
+					}
+				case "message_delta":
+					if event.Usage != nil {
+						rs.tokensOut = event.Usage.OutputTokens
+					}
+				}
+			}
+		}
 	}
-	s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+
+	_ = firstErr
+	return totalBytes
+}
+
+// extractUsageFromJSON parses usage from a non-streaming response body.
+func (s *Server) extractUsageFromJSON(body []byte, isAnthropic bool, rs *requestStats) {
+	if isAnthropic {
+		var resp struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			rs.tokensIn = resp.Usage.InputTokens
+			rs.tokensOut = resp.Usage.OutputTokens
+		}
+	} else {
+		var resp struct {
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			rs.tokensIn = resp.Usage.PromptTokens
+			rs.tokensOut = resp.Usage.CompletionTokens
+		}
+	}
 }
 
 func (s *Server) logRequest(modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, rs *requestStats, latencyMs int64) {

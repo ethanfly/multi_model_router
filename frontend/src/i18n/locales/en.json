@@ -76,7 +76,19 @@
     "manualModelDesc": "Select the model to use in manual mode",
     "proxyApiKey": "Proxy API Key",
     "proxyApiKeyDesc": "API key required to access the proxy endpoint. Leave empty to disable auth.",
-    "proxyApiKeyHint": "Passed via Authorization: Bearer <key> or x-api-key header"
+    "proxyApiKeyHint": "Passed via Authorization: Bearer <key> or x-api-key header",
+    "exportModels": "Export",
+    "importModels": "Import",
+    "exportPassword": "Set export password",
+    "exportPasswordHint": "This password encrypts your API keys in the export file.",
+    "importPassword": "Enter import password",
+    "importPasswordHint": "The password used when exporting this file.",
+    "passwordMismatch": "Passwords do not match",
+    "exportSuccess": "Models exported successfully!",
+    "importSuccess": "{0} models imported successfully!",
+    "importError": "Import failed: incorrect password or invalid file.",
+    "confirmPassword": "Confirm password",
+    "noModelsToExport": "No models to export."
   },
   "titlebar": {
     "minimize": "Minimize",
