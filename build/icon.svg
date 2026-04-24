@@ -1,209 +1,76 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <defs>
-    <!-- Vibrant dopamine background gradient -->
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1a0533"/>
-      <stop offset="50%" style="stop-color:#0f0a2e"/>
-      <stop offset="100%" style="stop-color:#0a1628"/>
+    <linearGradient id="bg" x1="74" y1="46" x2="438" y2="466" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#102A43"/>
+      <stop offset="0.52" stop-color="#111827"/>
+      <stop offset="1" stop-color="#06111F"/>
     </linearGradient>
-
-    <!-- Hot pink to orange -->
-    <linearGradient id="g-pink" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#ff006e"/>
-      <stop offset="100%" style="stop-color:#ff6b35"/>
+    <linearGradient id="plate" x1="122" y1="104" x2="390" y2="408" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E3A5F"/>
+      <stop offset="1" stop-color="#0B1220"/>
     </linearGradient>
-
-    <!-- Electric blue to cyan -->
-    <linearGradient id="g-blue" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#00b4d8"/>
-      <stop offset="100%" style="stop-color:#00f5d4"/>
+    <linearGradient id="hub" x1="178" y1="168" x2="334" y2="344" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#67E8F9"/>
+      <stop offset="0.48" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
     </linearGradient>
-
-    <!-- Purple to pink -->
-    <linearGradient id="g-purple" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9d4edd"/>
-      <stop offset="100%" style="stop-color:#ff006e"/>
+    <linearGradient id="coolFlow" x1="116" y1="122" x2="396" y2="224" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#818CF8"/>
+      <stop offset="0.5" stop-color="#38BDF8"/>
+      <stop offset="1" stop-color="#22D3EE"/>
     </linearGradient>
-
-    <!-- Lime to yellow -->
-    <linearGradient id="g-lime" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#80ed99"/>
-      <stop offset="100%" style="stop-color:#ffd60a"/>
+    <linearGradient id="warmFlow" x1="116" y1="390" x2="396" y2="282" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F59E0B"/>
+      <stop offset="0.52" stop-color="#FBBF24"/>
+      <stop offset="1" stop-color="#34D399"/>
     </linearGradient>
-
-    <!-- Orange to red -->
-    <linearGradient id="g-orange" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#ff9f1c"/>
-      <stop offset="100%" style="stop-color:#ff0054"/>
-    </linearGradient>
-
-    <!-- Hub gradient -->
-    <radialGradient id="hub" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" style="stop-color:#ff006e"/>
-      <stop offset="40%" style="stop-color:#9d4edd"/>
-      <stop offset="100%" style="stop-color:#00b4d8"/>
-    </radialGradient>
-
-    <!-- Glow filters -->
-    <filter id="glow-pink" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
-      <feFlood flood-color="#ff006e" flood-opacity="0.5"/>
-      <feComposite in2="blur" operator="in"/>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000814" flood-opacity="0.48"/>
     </filter>
-
-    <filter id="glow-blue" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="6" result="blur"/>
-      <feFlood flood-color="#00b4d8" flood-opacity="0.5"/>
-      <feComposite in2="blur" operator="in"/>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-
-    <filter id="glow-purple" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="6" result="blur"/>
-      <feFlood flood-color="#9d4edd" flood-opacity="0.5"/>
-      <feComposite in2="blur" operator="in"/>
-      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-
-    <filter id="glow-sm" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000" flood-opacity="0.5"/>
-    </filter>
-
-    <filter id="inner-glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="4" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.22 0 0 0 0 0.62 0 0 0 0 1 0 0 0 0.46 0"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
     </filter>
   </defs>
 
-  <!-- Background -->
-  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+  <path d="M74 355C121 436 225 468 318 437C406 408 459 322 433 229C407 137 326 74 236 78C145 82 77 151 62 235C55 277 54 323 74 355Z" fill="#1D4ED8" opacity="0.13"/>
+  <path d="M374 82C424 111 451 159 445 207C439 256 402 296 353 310C305 323 251 309 220 272C188 235 178 179 204 134C230 90 323 53 374 82Z" fill="#06B6D4" opacity="0.08"/>
 
-  <!-- Glowing background orbs -->
-  <circle cx="120" cy="100" r="100" fill="#ff006e" opacity="0.08" filter="url(#glow-pink)"/>
-  <circle cx="420" cy="80" r="80" fill="#00b4d8" opacity="0.08" filter="url(#glow-blue)"/>
-  <circle cx="450" cy="420" r="90" fill="#9d4edd" opacity="0.08" filter="url(#glow-purple)"/>
-  <circle cx="60" cy="400" r="70" fill="#80ed99" opacity="0.06" filter="url(#glow-sm)"/>
-
-  <!-- Radiating connection lines from center -->
-  <g stroke-width="3" stroke-linecap="round">
-    <line x1="256" y1="256" x2="256" y2="110" stroke="url(#g-blue)" opacity="0.7" filter="url(#glow-sm)"/>
-    <line x1="256" y1="256" x2="400" y2="200" stroke="url(#g-pink)" opacity="0.7" filter="url(#glow-sm)"/>
-    <line x1="256" y1="256" x2="400" y2="312" stroke="url(#g-purple)" opacity="0.7" filter="url(#glow-sm)"/>
-    <line x1="256" y1="256" x2="256" y2="402" stroke="url(#g-lime)" opacity="0.7" filter="url(#glow-sm)"/>
-    <line x1="256" y1="256" x2="112" y2="312" stroke="url(#g-orange)" opacity="0.7" filter="url(#glow-sm)"/>
-    <line x1="256" y1="256" x2="112" y2="200" stroke="url(#g-blue)" opacity="0.7" filter="url(#glow-sm)"/>
+  <g filter="url(#shadow)">
+    <path d="M256 88L402 172V340L256 424L110 340V172L256 88Z" fill="url(#plate)" stroke="rgba(148,163,184,0.25)" stroke-width="4"/>
+    <path d="M256 123L372 190V322L256 389L140 322V190L256 123Z" fill="none" stroke="#38BDF8" stroke-width="5" opacity="0.16"/>
   </g>
 
-  <!-- Animated flow dots on lines -->
-  <g filter="url(#glow-sm)">
-    <circle cx="256" cy="183" r="5" fill="#00f5d4"/>
-    <circle cx="322" cy="228" r="4" fill="#ff006e"/>
-    <circle cx="322" cy="284" r="4" fill="#ff006e"/>
-    <circle cx="256" cy="356" r="5" fill="#ffd60a"/>
-    <circle cx="184" cy="284" r="4" fill="#ff9f1c"/>
-    <circle cx="184" cy="228" r="4" fill="#00b4d8"/>
+  <g stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <path d="M256 256L256 126" stroke="#38BDF8" stroke-width="28"/>
+    <path d="M256 256L386 256" stroke="url(#coolFlow)" stroke-width="28"/>
+    <path d="M256 256L256 386" stroke="#FBBF24" stroke-width="28"/>
+    <path d="M256 256L126 256" stroke="url(#warmFlow)" stroke-width="28"/>
   </g>
 
-  <!-- Outer decorative ring -->
-  <circle cx="256" cy="256" r="200" fill="none" stroke="url(#g-purple)" stroke-width="2" stroke-dasharray="8 12" opacity="0.3"/>
-  <circle cx="256" cy="256" r="185" fill="none" stroke="url(#g-blue)" stroke-width="1" stroke-dasharray="4 8" opacity="0.2"/>
-
-  <!-- === TOP NODE (Cyan - primary) === -->
-  <circle cx="256" cy="100" r="44" fill="url(#bg)" stroke="url(#g-blue)" stroke-width="4" filter="url(#shadow)"/>
-  <circle cx="256" cy="100" r="32" fill="none" stroke="#00f5d4" stroke-width="1.5" opacity="0.5"/>
-  <!-- Lightning bolt -->
-  <g transform="translate(256,100)" fill="#00f5d4" filter="url(#glow-sm)">
-    <path d="M-5,-16 L8,-16 L-2,0 L6,0 L-8,18 L1,0 L-6,0 Z"/>
+  <g filter="url(#shadow)">
+    <circle cx="256" cy="116" r="48" fill="#0B1220" stroke="#22D3EE" stroke-width="16"/>
+    <circle cx="396" cy="256" r="48" fill="#0B1220" stroke="#60A5FA" stroke-width="16"/>
+    <circle cx="256" cy="396" r="48" fill="#0B1220" stroke="#FBBF24" stroke-width="16"/>
+    <circle cx="116" cy="256" r="48" fill="#0B1220" stroke="#34D399" stroke-width="16"/>
   </g>
 
-  <!-- === TOP-RIGHT NODE (Pink) === -->
-  <circle cx="406" cy="196" r="36" fill="url(#bg)" stroke="url(#g-pink)" stroke-width="3" filter="url(#shadow)"/>
-  <circle cx="406" cy="196" r="26" fill="none" stroke="#ff6b35" stroke-width="1.5" opacity="0.5"/>
-  <text x="406" y="205" text-anchor="middle" fill="#ff006e" font-family="system-ui,sans-serif" font-size="22" font-weight="800" filter="url(#glow-sm)">AI</text>
-
-  <!-- === BOTTOM-RIGHT NODE (Purple) === -->
-  <circle cx="406" cy="316" r="36" fill="url(#bg)" stroke="url(#g-purple)" stroke-width="3" filter="url(#shadow)"/>
-  <circle cx="406" cy="316" r="26" fill="none" stroke="#9d4edd" stroke-width="1.5" opacity="0.5"/>
-  <!-- Star icon -->
-  <g transform="translate(406,316)" fill="#9d4edd" filter="url(#glow-sm)">
-    <path d="M0,-14 L3,-5 L12,-5 L5,2 L8,12 L0,6 L-8,12 L-5,2 L-12,-5 L-3,-5 Z"/>
+  <g filter="url(#shadow)">
+    <circle cx="256" cy="256" r="94" fill="#09111F" stroke="url(#hub)" stroke-width="16"/>
+    <path d="M256 184L322 222V290L256 328L190 290V222L256 184Z" fill="#E0F2FE"/>
+    <path d="M256 214L296 237V279L256 302L216 279V237L256 214Z" fill="#0F172A"/>
+    <circle cx="256" cy="256" r="17" fill="#67E8F9"/>
   </g>
 
-  <!-- === BOTTOM NODE (Lime/Yellow) === -->
-  <circle cx="256" cy="412" r="38" fill="url(#bg)" stroke="url(#g-lime)" stroke-width="3" filter="url(#shadow)"/>
-  <circle cx="256" cy="412" r="28" fill="none" stroke="#ffd60a" stroke-width="1.5" opacity="0.5"/>
-  <!-- Zigzag/routing icon -->
-  <g transform="translate(256,412)" stroke="#ffd60a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow-sm)">
-    <path d="M-12,-8 L-4,-8 L-4,8 L4,8 L4,-8 L12,-8"/>
-  </g>
-
-  <!-- === BOTTOM-LEFT NODE (Orange) === -->
-  <circle cx="106" cy="316" r="34" fill="url(#bg)" stroke="url(#g-orange)" stroke-width="3" filter="url(#shadow)"/>
-  <circle cx="106" cy="316" r="24" fill="none" stroke="#ff9f1c" stroke-width="1.5" opacity="0.5"/>
-  <text x="106" y="324" text-anchor="middle" fill="#ff9f1c" font-family="system-ui,sans-serif" font-size="18" font-weight="800" filter="url(#glow-sm)">M</text>
-
-  <!-- === TOP-LEFT NODE (Blue) === -->
-  <circle cx="106" cy="196" r="34" fill="url(#bg)" stroke="url(#g-blue)" stroke-width="3" filter="url(#shadow)"/>
-  <circle cx="106" cy="196" r="24" fill="none" stroke="#00b4d8" stroke-width="1.5" opacity="0.5"/>
-  <!-- Diamond/gem icon -->
-  <g transform="translate(106,196)" fill="#00b4d8" filter="url(#glow-sm)">
-    <path d="M0,-14 L10,0 L0,14 L-10,0 Z"/>
-    <path d="M0,-8 L5,0 L0,8 L-5,0 Z" fill="#00f5d4" opacity="0.6"/>
-  </g>
-
-  <!-- === CENTER HUB === -->
-  <!-- Outer glow -->
-  <circle cx="256" cy="256" r="68" fill="none" stroke="#ff006e" stroke-width="2" opacity="0.4" filter="url(#glow-pink)"/>
-  <circle cx="256" cy="256" r="60" fill="none" stroke="#9d4edd" stroke-width="1.5" opacity="0.3" filter="url(#glow-purple)"/>
-
-  <!-- Hub body -->
-  <circle cx="256" cy="256" r="52" fill="url(#bg)" stroke="url(#hub)" stroke-width="4" filter="url(#shadow)"/>
-
-  <!-- Inner rings -->
-  <circle cx="256" cy="256" r="40" fill="none" stroke="#ff006e" stroke-width="1.5" opacity="0.5"/>
-  <circle cx="256" cy="256" r="28" fill="url(#bg)" stroke="#00b4d8" stroke-width="1" opacity="0.4"/>
-
-  <!-- Central router symbol: 4-way arrows with gradient colors -->
-  <g transform="translate(256,256)">
-    <!-- Up arrow (pink) -->
-    <path d="M0,-18 L8,-8 L4,-8 L4,4 L-4,4 L-4,-8 L-8,-8 Z" fill="#ff006e" filter="url(#glow-pink)"/>
-    <!-- Down arrow (purple) -->
-    <path d="M0,18 L-8,8 L-4,8 L-4,-4 L4,-4 L4,8 L8,8 Z" fill="#9d4edd" filter="url(#glow-purple)"/>
-    <!-- Left arrow (blue) -->
-    <path d="M-18,0 L-8,-8 L-8,-4 L4,-4 L4,4 L-8,4 L-8,8 Z" fill="#00b4d8" filter="url(#glow-blue)"/>
-    <!-- Right arrow (lime) -->
-    <path d="M18,0 L8,8 L8,4 L-4,4 L-4,-4 L8,-4 L8,-8 Z" fill="#80ed99" filter="url(#glow-sm)"/>
-    <!-- Center core -->
-    <circle cx="0" cy="0" r="8" fill="#ffd60a" filter="url(#glow-sm)"/>
-    <circle cx="0" cy="0" r="4" fill="#fff"/>
-  </g>
-
-  <!-- Pulse rings -->
-  <circle cx="256" cy="256" r="78" fill="none" stroke="#ff006e" stroke-width="1" opacity="0.2"/>
-  <circle cx="256" cy="256" r="92" fill="none" stroke="#9d4edd" stroke-width="0.5" opacity="0.15"/>
-  <circle cx="256" cy="256" r="108" fill="none" stroke="#00b4d8" stroke-width="0.5" opacity="0.1"/>
-
-  <!-- Corner decorations -->
-  <g stroke-width="2" stroke-linecap="round" opacity="0.4">
-    <path d="M40,40 L40,70 M40,40 L70,40" stroke="url(#g-pink)"/>
-    <path d="M472,40 L472,70 M472,40 L442,40" stroke="url(#g-blue)"/>
-    <path d="M40,472 L40,442 M40,472 L70,472" stroke="url(#g-lime)"/>
-    <path d="M472,472 L472,442 M472,472 L442,472" stroke="url(#g-orange)"/>
-  </g>
-
-  <!-- Floating sparkles -->
-  <g fill="#fff" opacity="0.6">
-    <circle cx="70" cy="150" r="2"/>
-    <circle cx="440" cy="380" r="2"/>
-    <circle cx="340" cy="70" r="1.5"/>
-    <circle cx="170" cy="440" r="1.5"/>
-    <circle cx="480" cy="250" r="2"/>
-    <circle cx="32" cy="260" r="1.5"/>
+  <g fill="#E0F2FE" opacity="0.95">
+    <circle cx="256" cy="116" r="14"/>
+    <circle cx="396" cy="256" r="14"/>
+    <circle cx="256" cy="396" r="14"/>
+    <circle cx="116" cy="256" r="14"/>
   </g>
 </svg>

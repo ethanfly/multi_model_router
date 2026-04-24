@@ -33,17 +33,18 @@ async function handleClose() {
   <div class="title-bar">
     <div class="drag-region">
       <div class="app-info">
-        <svg class="app-logo" width="18" height="18" viewBox="0 0 512 512" fill="none">
-          <rect width="512" height="512" rx="96" fill="#1e293b"/>
-          <circle cx="256" cy="256" r="32" fill="none" stroke="#3b82f6" stroke-width="4"/>
-          <circle cx="148" cy="148" r="24" fill="none" stroke="#3b82f6" stroke-width="2.5"/>
-          <circle cx="364" cy="148" r="24" fill="none" stroke="#06b6d4" stroke-width="2.5"/>
-          <circle cx="148" cy="364" r="24" fill="none" stroke="#8b5cf6" stroke-width="2.5"/>
-          <circle cx="364" cy="364" r="24" fill="none" stroke="#f59e0b" stroke-width="2.5"/>
-          <line x1="256" y1="256" x2="148" y2="148" stroke="#3b82f6" stroke-width="2" opacity="0.5"/>
-          <line x1="256" y1="256" x2="364" y2="148" stroke="#06b6d4" stroke-width="2" opacity="0.5"/>
-          <line x1="256" y1="256" x2="148" y2="364" stroke="#8b5cf6" stroke-width="2" opacity="0.5"/>
-          <line x1="256" y1="256" x2="364" y2="364" stroke="#f59e0b" stroke-width="2" opacity="0.5"/>
+        <svg class="app-logo" width="18" height="18" viewBox="0 0 512 512" fill="none" aria-hidden="true">
+          <rect width="512" height="512" rx="108" fill="#0f172a"/>
+          <path d="M256 92L398 174V338L256 420L114 338V174L256 92Z" fill="#111827" stroke="#334155" stroke-width="24"/>
+          <path d="M256 256V116M256 256H396M256 256V396M256 256H116" stroke="#38bdf8" stroke-width="42" stroke-linecap="round"/>
+          <circle cx="256" cy="116" r="48" fill="#0f172a" stroke="#22d3ee" stroke-width="24"/>
+          <circle cx="396" cy="256" r="48" fill="#0f172a" stroke="#60a5fa" stroke-width="24"/>
+          <circle cx="256" cy="396" r="48" fill="#0f172a" stroke="#fbbf24" stroke-width="24"/>
+          <circle cx="116" cy="256" r="48" fill="#0f172a" stroke="#34d399" stroke-width="24"/>
+          <circle cx="256" cy="256" r="94" fill="#0f172a" stroke="#60a5fa" stroke-width="28"/>
+          <path d="M256 184L322 222V290L256 328L190 290V222L256 184Z" fill="#e0f2fe"/>
+          <path d="M256 214L296 237V279L256 302L216 279V237L256 214Z" fill="#0f172a"/>
+          <circle cx="256" cy="256" r="17" fill="#67e8f9"/>
         </svg>
         <span class="app-title">{{ $t('app.title') }}</span>
       </div>
