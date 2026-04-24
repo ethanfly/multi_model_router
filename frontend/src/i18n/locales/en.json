@@ -27,6 +27,7 @@
     "modelUsage": "Model Usage",
     "complexityDist": "Complexity Distribution",
     "recentLogs": "Recent Logs",
+    "refresh": "Refresh",
     "noUsageData": "No usage data yet",
     "noData": "No data yet",
     "noLogs": "No logs yet",

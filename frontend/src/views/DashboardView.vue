@@ -222,10 +222,13 @@ function formatLogTime(value: unknown): string {
       <div class="logs-section">
         <div class="logs-header">
           <h3>{{ $t('dashboard.recentLogs') }}</h3>
-          <div v-if="logTotal > 0" class="pagination">
-            <button class="page-btn" :disabled="logPage <= 1 || logLoading" @click="prevPage">{{ $t('dashboard.prevPage') }}</button>
-            <span class="page-info">{{ logPage }} / {{ totalPages }}</span>
-            <button class="page-btn" :disabled="logPage >= totalPages || logLoading" @click="nextPage">{{ $t('dashboard.nextPage') }}</button>
+          <div class="pagination">
+            <button class="page-btn refresh-btn" :disabled="logLoading" @click="loadLogs">{{ $t('dashboard.refresh') }}</button>
+            <template v-if="logTotal > 0">
+              <button class="page-btn" :disabled="logPage <= 1 || logLoading" @click="prevPage">{{ $t('dashboard.prevPage') }}</button>
+              <span class="page-info">{{ logPage }} / {{ totalPages }}</span>
+              <button class="page-btn" :disabled="logPage >= totalPages || logLoading" @click="nextPage">{{ $t('dashboard.nextPage') }}</button>
+            </template>
           </div>
         </div>
         <div class="table-wrap">

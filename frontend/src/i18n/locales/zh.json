@@ -27,6 +27,7 @@
     "modelUsage": "模型使用",
     "complexityDist": "复杂度分布",
     "recentLogs": "最近日志",
+    "refresh": "刷新",
     "noUsageData": "暂无使用数据",
     "noData": "暂无数据",
     "noLogs": "暂无日志",
