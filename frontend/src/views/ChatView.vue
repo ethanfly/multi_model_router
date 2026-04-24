@@ -12,6 +12,8 @@ interface ChatMessage {
   modelName?: string
   complexity?: string
   routeMode?: string
+  diagnostics?: string
+  diagnosticsJson?: string
   isError?: boolean
 }
 
@@ -36,7 +38,17 @@ onMounted(async () => {
     }
   })
 
-  EventsOn('chat:done', () => {
+  EventsOn('chat:done', (data: any) => {
+    const lastMsg = messages.value[messages.value.length - 1]
+    if (lastMsg && lastMsg.role === 'assistant' && data && typeof data !== 'string') {
+      lastMsg.modelName = data.model || lastMsg.modelName
+      if (data.diagnostics) {
+        lastMsg.diagnostics = data.diagnostics
+      }
+      if (data.diagnosticsJson) {
+        lastMsg.diagnosticsJson = data.diagnosticsJson
+      }
+    }
     isStreaming.value = false
   })
 
@@ -91,6 +103,15 @@ async function sendMessage() {
       })
       isStreaming.value = false
       scrollToBottom()
+    } else if (resp && resp.status === 'success') {
+      const lastMsg = messages.value[messages.value.length - 1]
+      if (lastMsg && lastMsg.role === 'assistant') {
+        lastMsg.modelName = resp.modelName
+        lastMsg.complexity = resp.complexity
+        lastMsg.routeMode = resp.routeMode
+        lastMsg.diagnostics = resp.diagnostics
+        lastMsg.diagnosticsJson = resp.diagnosticsJson
+      }
     }
   } catch (err: any) {
     messages.value.push({

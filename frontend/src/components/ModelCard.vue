@@ -73,7 +73,8 @@ async function handleTest() {
     </div>
 
     <div class="card-meta">
-      <span>RPM: {{ model.maxRpm || $t('modelCard.unlimited') }}</span>
+      <span>{{ $t('modelCard.rpmLabel') }}: {{ model.maxRpm || $t('modelCard.unlimited') }}</span>
+      <span>{{ $t('modelCard.tpmLabel') }}: {{ model.maxTpm || $t('modelCard.unlimited') }}</span>
     </div>
 
     <div v-if="testResult" :class="['test-result', { 'test-error': testResult.startsWith('Error') }]">{{ testResult }}</div>
@@ -228,6 +229,9 @@ async function handleTest() {
 }
 
 .card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   font-size: 12px;
   color: var(--text-muted);
 }

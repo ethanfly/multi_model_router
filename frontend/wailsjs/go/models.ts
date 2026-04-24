@@ -56,6 +56,8 @@ export namespace core {
 	    routeMode: string;
 	    status: string;
 	    error: string;
+	    diagnostics: string;
+	    diagnosticsJson: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ChatResponse(source);
@@ -70,6 +72,8 @@ export namespace core {
 	        this.routeMode = source["routeMode"];
 	        this.status = source["status"];
 	        this.error = source["error"];
+	        this.diagnostics = source["diagnostics"];
+	        this.diagnosticsJson = source["diagnosticsJson"];
 	    }
 	}
 	export class ModelJSON {

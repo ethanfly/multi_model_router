@@ -2,7 +2,10 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +39,7 @@ type ModelConfig struct {
 type RouteMode int
 
 const (
-	RouteAuto   RouteMode = iota
+	RouteAuto RouteMode = iota
 	RouteManual
 	RouteRace
 )
@@ -67,31 +70,31 @@ func (r RouteMode) String() string {
 
 // complexityWeights maps complexity levels to weighted scoring dimensions.
 var complexityWeights = map[Complexity]struct {
-	Reasoning     float64
-	Coding        float64
-	Creativity    float64
-	Speed         float64
+	Reasoning      float64
+	Coding         float64
+	Creativity     float64
+	Speed          float64
 	CostEfficiency float64
 }{
 	Simple: {
-		Reasoning:     0.1,
-		Coding:        0.1,
-		Creativity:    0.15,
-		Speed:         0.35,
+		Reasoning:      0.1,
+		Coding:         0.1,
+		Creativity:     0.15,
+		Speed:          0.35,
 		CostEfficiency: 0.3,
 	},
 	Medium: {
-		Reasoning:     0.2,
-		Coding:        0.2,
-		Creativity:    0.2,
-		Speed:         0.2,
+		Reasoning:      0.2,
+		Coding:         0.2,
+		Creativity:     0.2,
+		Speed:          0.2,
 		CostEfficiency: 0.2,
 	},
 	Complex: {
-		Reasoning:     0.35,
-		Coding:        0.3,
-		Creativity:    0.1,
-		Speed:         0.1,
+		Reasoning:      0.35,
+		Coding:         0.3,
+		Creativity:     0.1,
+		Speed:          0.1,
 		CostEfficiency: 0.15,
 	},
 }
@@ -119,22 +122,90 @@ type RouteResult struct {
 	Status      string
 	ErrorMsg    string
 	Stream      <-chan provider.StreamChunk
+	Diagnostics *RouteDiagnostics
+}
+
+type RouteDiagnostics struct {
+	Mode                 string                `json:"mode"`
+	ClassificationInput  string                `json:"classificationInput,omitempty"`
+	ClassificationMethod string                `json:"classificationMethod,omitempty"`
+	Complexity           string                `json:"complexity,omitempty"`
+	EstimatedTokens      int                   `json:"estimatedTokens,omitempty"`
+	SelectedModel        string                `json:"selectedModel,omitempty"`
+	FallbackUsed         bool                  `json:"fallbackUsed"`
+	Summary              string                `json:"summary"`
+	Candidates           []CandidateDiagnostic `json:"candidates,omitempty"`
+}
+
+type CandidateDiagnostic struct {
+	Name      string  `json:"name"`
+	ModelID   string  `json:"modelId"`
+	Provider  string  `json:"provider"`
+	Eligible  bool    `json:"eligible"`
+	Score     float64 `json:"score,omitempty"`
+	Decision  string  `json:"decision,omitempty"`
+	Reason    string  `json:"reason,omitempty"`
+	RecentRPM int     `json:"recentRpm"`
+	RecentTPM int     `json:"recentTpm"`
+	MaxRPM    int     `json:"maxRpm"`
+	MaxTPM    int     `json:"maxTpm"`
+}
+
+type SelectionResult struct {
+	Model       *ModelConfig
+	Complexity  int64
+	ErrorMsg    string
+	Diagnostics *RouteDiagnostics
 }
 
 // Engine is the main router engine that selects models and routes requests.
 type Engine struct {
-	classifier  *Classifier
-	models      map[string]*ModelConfig
-	rateLimits  map[string]time.Time
-	mu          sync.RWMutex
+	classifier   *Classifier
+	models       map[string]*ModelConfig
+	rateLimits   map[string]time.Time
+	usageRecords map[string][]usageRecord
+	mu           sync.RWMutex
 }
+
+type usageRecord struct {
+	requestID string
+	timestamp time.Time
+	tokens    int
+}
+
+type rankedCandidate struct {
+	model *ModelConfig
+	score float64
+}
+
+type candidateEvaluation struct {
+	model     *ModelConfig
+	score     float64
+	eligible  bool
+	reason    string
+	recentRPM int
+	recentTPM int
+}
+
+type tokenEstimate struct {
+	promptTokens int
+	totalTokens  int
+}
+
+const (
+	usageWindow                   = time.Minute
+	providerRateLimitBackoff      = 30 * time.Second
+	defaultCompletionTokenReserve = 512
+	tieScoreEpsilon               = 1e-9
+)
 
 // NewEngine creates a new router Engine with the given classifier.
 func NewEngine(classifier *Classifier) *Engine {
 	return &Engine{
-		classifier: classifier,
-		models:     make(map[string]*ModelConfig),
-		rateLimits: make(map[string]time.Time),
+		classifier:   classifier,
+		models:       make(map[string]*ModelConfig),
+		rateLimits:   make(map[string]time.Time),
+		usageRecords: make(map[string][]usageRecord),
 	}
 }
 
@@ -169,30 +240,81 @@ func (e *Engine) Route(ctx context.Context, req *RouteRequest) *RouteResult {
 // SelectModel performs routing and returns the selected ModelConfig without sending the request.
 // This enables raw passthrough proxying where the caller forwards the original request body directly.
 func (e *Engine) SelectModel(ctx context.Context, req *RouteRequest) (*ModelConfig, int64, string) {
+	selection := e.ExplainSelection(ctx, req)
+	if selection == nil {
+		return nil, 0, "selection unavailable"
+	}
+	return selection.Model, selection.Complexity, selection.ErrorMsg
+}
+
+func (e *Engine) ExplainSelection(ctx context.Context, req *RouteRequest) *SelectionResult {
 	switch req.Mode {
 	case RouteManual:
 		model := e.findModel(req.ModelID)
 		if model == nil {
-			return nil, 0, fmt.Sprintf("model %s not found", req.ModelID)
+			return &SelectionResult{
+				ErrorMsg: fmt.Sprintf("model %s not found", req.ModelID),
+				Diagnostics: &RouteDiagnostics{
+					Mode:    RouteManual.String(),
+					Summary: fmt.Sprintf("mode=manual; model=%s; error=model not found", req.ModelID),
+				},
+			}
 		}
-		return model, 0, ""
+		diagnostics := &RouteDiagnostics{
+			Mode:          RouteManual.String(),
+			SelectedModel: model.Name,
+			Summary:       fmt.Sprintf("mode=manual; selected=%s", model.Name),
+			Candidates: []CandidateDiagnostic{{
+				Name:     model.Name,
+				ModelID:  model.ModelID,
+				Provider: model.Provider,
+				Eligible: true,
+				Decision: "selected",
+			}},
+		}
+		return &SelectionResult{
+			Model:       model,
+			Complexity:  0,
+			Diagnostics: diagnostics,
+		}
 	default: // RouteAuto and RouteRace both select the best model
-		question := messagesToString(req.Messages)
+		question := messagesForClassification(req.Messages)
 		classResult, err := e.classifier.Classify(ctx, question)
 		if err != nil {
-			return nil, 0, fmt.Sprintf("classification failed: %v", err)
+			return &SelectionResult{
+				ErrorMsg: fmt.Sprintf("classification failed: %v", err),
+				Diagnostics: &RouteDiagnostics{
+					Mode:                req.Mode.String(),
+					ClassificationInput: question,
+					Summary:             fmt.Sprintf("mode=%s; error=classification failed", req.Mode.String()),
+				},
+			}
 		}
-		model := e.selectModel(classResult.Complexity)
-		if model == nil {
-			return nil, int64(classResult.Complexity), "no available model"
+		evaluations := e.evaluateCandidates(classResult.Complexity, req, nil)
+		models := eligibleModels(evaluations)
+		diagnostics := diagnosticsFromEvaluations(req.Mode.String(), question, classResult, estimateRequestTokens(req).totalTokens, evaluations)
+		if len(models) == 0 {
+			diagnostics.Summary = diagnosticsSummary(diagnostics)
+			return &SelectionResult{
+				Complexity:  int64(classResult.Complexity),
+				ErrorMsg:    unavailableModelError(evaluations),
+				Diagnostics: diagnostics,
+			}
 		}
-		return model, int64(classResult.Complexity), ""
+		diagnostics.SelectedModel = models[0].Name
+		diagnostics.Candidates = markDiagnosticDecision(diagnostics.Candidates, models[0].Name, "selected", "")
+		diagnostics.Summary = diagnosticsSummary(diagnostics)
+		return &SelectionResult{
+			Model:       models[0],
+			Complexity:  int64(classResult.Complexity),
+			Diagnostics: diagnostics,
+		}
 	}
 }
 
 // routeAuto classifies the question, selects the best model, and sends the request.
 func (e *Engine) routeAuto(ctx context.Context, req *RouteRequest) *RouteResult {
-	question := messagesToString(req.Messages)
+	question := messagesForClassification(req.Messages)
 	classResult, err := e.classifier.Classify(ctx, question)
 	if err != nil {
 		return &RouteResult{
@@ -201,29 +323,104 @@ func (e *Engine) routeAuto(ctx context.Context, req *RouteRequest) *RouteResult 
 		}
 	}
 
-	model := e.selectModel(classResult.Complexity)
-	if model == nil {
+	estimate := estimateRequestTokens(req)
+	evaluations := e.evaluateCandidates(classResult.Complexity, req, nil)
+	diagnostics := diagnosticsFromEvaluations(RouteAuto.String(), question, classResult, estimate.totalTokens, evaluations)
+	candidates := eligibleModels(evaluations)
+	if len(candidates) == 0 {
+		diagnostics.Summary = diagnosticsSummary(diagnostics)
 		return &RouteResult{
 			Status:      "error",
-			ErrorMsg:    "no available model",
+			ErrorMsg:    unavailableModelError(evaluations),
 			Complexity:  int64(classResult.Complexity),
+			Diagnostics: diagnostics,
 		}
 	}
 
-	result := e.sendToModel(ctx, model, req)
-	if result == nil || result.Status != "success" {
-		// Try fallback
-		fallback := e.selectModelFallback(classResult.Complexity, model.ID)
-		if fallback != nil {
-			result = e.sendToModel(ctx, fallback, req)
+	var result *RouteResult
+	var lastErr *RouteResult
+
+	for i, model := range candidates {
+		result = e.sendToModel(ctx, model, req)
+		if result == nil || result.Status != "success" {
+			lastErr = result
+			diagnostics.Candidates = markDiagnosticDecision(diagnostics.Candidates, model.Name, "failed", errorMessage(result))
+			continue
 		}
+
+		result = e.prepareAutoStreamResult(ctx, req, result, candidates[i+1:])
+		if result != nil && result.Status == "success" {
+			result.Complexity = int64(classResult.Complexity)
+			result.RouteMode = int64(RouteAuto)
+			result.Diagnostics = diagnostics
+			result.Diagnostics.SelectedModel = result.ModelName
+			result.Diagnostics.FallbackUsed = i > 0 || result.ModelName != candidates[0].Name
+			result.Diagnostics.Candidates = markDiagnosticDecision(result.Diagnostics.Candidates, result.ModelName, "selected", "")
+			result.Diagnostics.Summary = diagnosticsSummary(result.Diagnostics)
+			return result
+		}
+		lastErr = result
+		diagnostics.Candidates = markDiagnosticDecision(diagnostics.Candidates, model.Name, "failed", errorMessage(result))
 	}
 
-	if result != nil {
-		result.Complexity = int64(classResult.Complexity)
-		result.RouteMode = int64(RouteAuto)
+	if lastErr != nil {
+		lastErr.Complexity = int64(classResult.Complexity)
+		lastErr.RouteMode = int64(RouteAuto)
+		lastErr.Diagnostics = diagnostics
+		lastErr.Diagnostics.Summary = diagnosticsSummary(lastErr.Diagnostics)
+		return lastErr
 	}
-	return result
+
+	diagnostics.Summary = diagnosticsSummary(diagnostics)
+	return &RouteResult{
+		Status:      "error",
+		ErrorMsg:    "all auto-route candidates failed",
+		Complexity:  int64(classResult.Complexity),
+		RouteMode:   int64(RouteAuto),
+		Diagnostics: diagnostics,
+	}
+}
+
+func (e *Engine) prepareAutoStreamResult(ctx context.Context, req *RouteRequest, result *RouteResult, fallbacks []*ModelConfig) *RouteResult {
+	current := result
+	remaining := append([]*ModelConfig(nil), fallbacks...)
+
+	for {
+		buffered, failedEarly := primeStream(current.Stream)
+		if !failedEarly {
+			current.Stream = prependStream(buffered, current.Stream)
+			return current
+		}
+
+		if len(remaining) == 0 {
+			current.Stream = bufferedStream(buffered)
+			return current
+		}
+
+		switched := false
+		for len(remaining) > 0 {
+			nextModel := remaining[0]
+			remaining = remaining[1:]
+
+			nextResult := e.sendToModel(ctx, nextModel, req)
+			if nextResult == nil || nextResult.Status != "success" {
+				current = nextResult
+				continue
+			}
+
+			current = nextResult
+			switched = true
+			break
+		}
+
+		if !switched {
+			if current != nil && current.Status != "success" {
+				return current
+			}
+			current.Stream = bufferedStream(buffered)
+			return current
+		}
+	}
 }
 
 // routeManual routes the request to a specific model by ID or model name.
@@ -239,6 +436,18 @@ func (e *Engine) routeManual(ctx context.Context, req *RouteRequest) *RouteResul
 	result := e.sendToModel(ctx, model, req)
 	if result != nil {
 		result.RouteMode = int64(RouteManual)
+		result.Diagnostics = &RouteDiagnostics{
+			Mode:          RouteManual.String(),
+			SelectedModel: model.Name,
+			Summary:       fmt.Sprintf("mode=manual; selected=%s", model.Name),
+			Candidates: []CandidateDiagnostic{{
+				Name:     model.Name,
+				ModelID:  model.ModelID,
+				Provider: model.Provider,
+				Eligible: true,
+				Decision: "selected",
+			}},
+		}
 	}
 	return result
 }
@@ -266,108 +475,95 @@ func (e *Engine) findModel(idOrName string) *ModelConfig {
 // routeRace sends the request to all active, non-rate-limited models concurrently
 // and returns the first successful result.
 func (e *Engine) routeRace(ctx context.Context, req *RouteRequest) *RouteResult {
-	e.mu.RLock()
-	var candidates []*ModelConfig
-	for _, m := range e.models {
-		if m.IsActive && !e.isRateLimited(m.ID) {
-			candidates = append(candidates, m)
-		}
-	}
-	e.mu.RUnlock()
+	candidates := e.raceCandidates(req)
+	diagnostics := raceDiagnostics(req, candidates)
 
 	if len(candidates) == 0 {
 		return &RouteResult{
-			Status:   "error",
-			ErrorMsg: "no available models for race",
+			Status:      "error",
+			ErrorMsg:    "no available models for race",
+			Diagnostics: diagnostics,
 		}
 	}
 
 	type raceResult struct {
-		result *RouteResult
+		modelID string
+		result  *RouteResult
 	}
 
+	raceCtx, raceCancel := context.WithCancel(ctx)
+	defer raceCancel()
+
 	ch := make(chan *raceResult, len(candidates))
+	cancelFns := make(map[string]context.CancelFunc, len(candidates))
 	for _, m := range candidates {
+		candidateCtx, cancel := context.WithCancel(raceCtx)
+		cancelFns[m.ID] = cancel
 		go func(cfg *ModelConfig) {
-			r := e.sendToModel(ctx, cfg, req)
-			ch <- &raceResult{result: r}
+			r := e.sendToModel(candidateCtx, cfg, req)
+			if r != nil && r.Status == "success" {
+				buffered, failedEarly := primeStream(r.Stream)
+				if failedEarly {
+					r = &RouteResult{
+						ModelName: cfg.Name,
+						Provider:  cfg.Provider,
+						Status:    "error",
+						ErrorMsg:  chunkErrorMessage(buffered),
+					}
+				} else {
+					r.Stream = prependStream(buffered, r.Stream)
+				}
+			}
+			ch <- &raceResult{modelID: cfg.ID, result: r}
 		}(m)
 	}
 
 	for range candidates {
 		rr := <-ch
 		if rr.result != nil && rr.result.Status == "success" {
+			for modelID, cancel := range cancelFns {
+				if modelID != rr.modelID {
+					cancel()
+				}
+			}
 			rr.result.RouteMode = int64(RouteRace)
+			rr.result.Diagnostics = diagnostics
+			rr.result.Diagnostics.SelectedModel = rr.result.ModelName
+			rr.result.Diagnostics.Candidates = markDiagnosticDecision(rr.result.Diagnostics.Candidates, rr.result.ModelName, "selected", "")
+			rr.result.Diagnostics.Summary = diagnosticsSummary(rr.result.Diagnostics)
 			return rr.result
 		}
+		diagnostics.Candidates = markDiagnosticDecision(diagnostics.Candidates, candidateNameByID(candidates, rr.modelID), "failed", errorMessage(rr.result))
 	}
 
+	for _, cancel := range cancelFns {
+		cancel()
+	}
+
+	diagnostics.Summary = diagnosticsSummary(diagnostics)
 	return &RouteResult{
-		Status:   "error",
-		ErrorMsg: "all models failed in race",
+		Status:      "error",
+		ErrorMsg:    "all models failed in race",
+		Diagnostics: diagnostics,
 	}
 }
 
 // selectModel selects the best model for the given complexity using weighted scoring.
-func (e *Engine) selectModel(complexity Complexity) *ModelConfig {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	weights, ok := complexityWeights[complexity]
-	if !ok {
-		weights = complexityWeights[Medium]
+func (e *Engine) selectModel(complexity Complexity, req *RouteRequest) *ModelConfig {
+	candidates := e.rankedCandidates(complexity, req, nil)
+	if len(candidates) == 0 {
+		return nil
 	}
-
-	var best *ModelConfig
-	bestScore := -1.0
-
-	for _, m := range e.models {
-		if !m.IsActive || e.isRateLimited(m.ID) {
-			continue
-		}
-		score := weights.Reasoning*float64(m.Reasoning) +
-			weights.Coding*float64(m.Coding) +
-			weights.Creativity*float64(m.Creativity) +
-			weights.Speed*float64(m.Speed) +
-			weights.CostEfficiency*float64(m.CostEfficiency)
-		if score > bestScore {
-			bestScore = score
-			best = m
-		}
-	}
-
-	return best
+	return candidates[0]
 }
 
 // selectModelFallback selects a fallback model, excluding the given model ID.
-func (e *Engine) selectModelFallback(complexity Complexity, excludeID string) *ModelConfig {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-
-	weights, ok := complexityWeights[complexity]
-	if !ok {
-		weights = complexityWeights[Medium]
+func (e *Engine) selectModelFallback(complexity Complexity, req *RouteRequest, excludeID string) *ModelConfig {
+	candidates := e.rankedCandidates(complexity, req, map[string]bool{excludeID: true})
+	if len(candidates) == 0 {
+		return nil
 	}
-
-	var best *ModelConfig
-	bestScore := -1.0
-
-	for _, m := range e.models {
-		if !m.IsActive || m.ID == excludeID || e.isRateLimited(m.ID) {
-			continue
-		}
-		score := weights.Reasoning*float64(m.Reasoning) +
-			weights.Coding*float64(m.Coding) +
-			weights.Creativity*float64(m.Creativity) +
-			weights.Speed*float64(m.Speed) +
-			weights.CostEfficiency*float64(m.CostEfficiency)
-		if score > bestScore {
-			bestScore = score
-			best = m
-		}
-	}
-
-	return best
+	return candidates[0]
 }
 
 // sendToModel sends a request to the specified model via its provider.
@@ -380,6 +576,8 @@ func (e *Engine) sendToModel(ctx context.Context, cfg *ModelConfig, req *RouteRe
 	}
 
 	start := time.Now()
+	estimate := estimateRequestTokens(req)
+	reservationID := e.reserveUsage(cfg.ID, estimate.totalTokens)
 
 	chatReq := &provider.ChatRequest{
 		Model:       cfg.ModelID,
@@ -391,6 +589,10 @@ func (e *Engine) sendToModel(ctx context.Context, cfg *ModelConfig, req *RouteRe
 
 	stream, err := cfg.ProviderInstance.ChatCompletion(ctx, chatReq)
 	if err != nil {
+		e.reconcileUsage(cfg.ID, reservationID, 0)
+		if isRateLimitError(err) {
+			e.markRateLimited(cfg.ID, time.Now().Add(providerRateLimitBackoff))
+		}
 		return &RouteResult{
 			Status:   "error",
 			ErrorMsg: err.Error(),
@@ -405,16 +607,231 @@ func (e *Engine) sendToModel(ctx context.Context, cfg *ModelConfig, req *RouteRe
 		Provider:  cfg.Provider,
 		LatencyMs: latency,
 		Status:    "success",
-		Stream:    stream,
+		Stream:    e.observeStream(cfg.ID, reservationID, estimate, stream),
 	}
 }
 
 // isRateLimited checks if a model is currently rate-limited.
 func (e *Engine) isRateLimited(modelID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.isRateLimitedLocked(modelID, time.Now())
+}
+
+func (e *Engine) rankedCandidates(complexity Complexity, req *RouteRequest, exclude map[string]bool) []*ModelConfig {
+	return eligibleModels(e.evaluateCandidates(complexity, req, exclude))
+}
+
+func (e *Engine) raceCandidates(req *RouteRequest) []*ModelConfig {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	now := time.Now()
+	estimate := estimateRequestTokens(req)
+	candidates := make([]*ModelConfig, 0, len(e.models))
+
+	for _, m := range e.models {
+		if !m.IsActive || e.isRateLimitedLocked(m.ID, now) || !e.withinCapacityLocked(m, estimate.totalTokens, now) {
+			continue
+		}
+		candidates = append(candidates, m)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return modelTieBreakKey(candidates[i]) < modelTieBreakKey(candidates[j])
+	})
+
+	return candidates
+}
+
+func (e *Engine) evaluateCandidates(complexity Complexity, req *RouteRequest, exclude map[string]bool) []candidateEvaluation {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	weights, ok := complexityWeights[complexity]
+	if !ok {
+		weights = complexityWeights[Medium]
+	}
+
+	now := time.Now()
+	estimate := estimateRequestTokens(req)
+	evaluations := make([]candidateEvaluation, 0, len(e.models))
+
+	for _, m := range e.models {
+		evaluation := candidateEvaluation{model: m}
+
+		if exclude != nil && exclude[m.ID] {
+			evaluation.reason = "excluded after prior failure"
+			evaluations = append(evaluations, evaluation)
+			continue
+		}
+		if !m.IsActive {
+			evaluation.reason = "inactive"
+			evaluations = append(evaluations, evaluation)
+			continue
+		}
+		if e.isRateLimitedLocked(m.ID, now) {
+			evaluation.reason = "rate limited cooldown active"
+			evaluations = append(evaluations, evaluation)
+			continue
+		}
+
+		e.pruneUsageLocked(m.ID, now)
+		records := e.usageRecords[m.ID]
+		evaluation.recentRPM = len(records)
+		for _, record := range records {
+			evaluation.recentTPM += record.tokens
+		}
+
+		switch {
+		case m.MaxRPM > 0 && evaluation.recentRPM >= m.MaxRPM:
+			evaluation.reason = fmt.Sprintf("rpm capacity reached (%d/%d)", evaluation.recentRPM, m.MaxRPM)
+		case m.MaxTPM > 0 && evaluation.recentTPM+estimate.totalTokens > m.MaxTPM:
+			evaluation.reason = fmt.Sprintf("tpm capacity exceeded (%d+%d>%d)", evaluation.recentTPM, estimate.totalTokens, m.MaxTPM)
+		default:
+			evaluation.eligible = true
+			evaluation.score = weights.Reasoning*float64(m.Reasoning) +
+				weights.Coding*float64(m.Coding) +
+				weights.Creativity*float64(m.Creativity) +
+				weights.Speed*float64(m.Speed) +
+				weights.CostEfficiency*float64(m.CostEfficiency)
+		}
+
+		evaluations = append(evaluations, evaluation)
+	}
+
+	sort.Slice(evaluations, func(i, j int) bool {
+		if evaluations[i].eligible != evaluations[j].eligible {
+			return evaluations[i].eligible
+		}
+		if evaluations[i].eligible && abs(evaluations[i].score-evaluations[j].score) > tieScoreEpsilon {
+			return evaluations[i].score > evaluations[j].score
+		}
+		return modelTieBreakKey(evaluations[i].model) < modelTieBreakKey(evaluations[j].model)
+	})
+
+	return evaluations
+}
+
+func (e *Engine) isRateLimitedLocked(modelID string, now time.Time) bool {
 	if t, ok := e.rateLimits[modelID]; ok {
-		return time.Now().Before(t)
+		if now.Before(t) {
+			return true
+		}
+		delete(e.rateLimits, modelID)
 	}
 	return false
+}
+
+func (e *Engine) withinCapacityLocked(model *ModelConfig, estimatedTokens int, now time.Time) bool {
+	e.pruneUsageLocked(model.ID, now)
+	records := e.usageRecords[model.ID]
+
+	if model.MaxRPM > 0 && len(records) >= model.MaxRPM {
+		return false
+	}
+
+	if model.MaxTPM > 0 {
+		totalTokens := 0
+		for _, record := range records {
+			totalTokens += record.tokens
+		}
+		if totalTokens+estimatedTokens > model.MaxTPM {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (e *Engine) pruneUsageLocked(modelID string, now time.Time) {
+	records := e.usageRecords[modelID]
+	if len(records) == 0 {
+		return
+	}
+
+	keep := records[:0]
+	for _, record := range records {
+		if now.Sub(record.timestamp) < usageWindow {
+			keep = append(keep, record)
+		}
+	}
+
+	if len(keep) == 0 {
+		delete(e.usageRecords, modelID)
+		return
+	}
+
+	e.usageRecords[modelID] = keep
+}
+
+func (e *Engine) reserveUsage(modelID string, estimatedTokens int) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	now := time.Now()
+	e.pruneUsageLocked(modelID, now)
+	requestID := uuid.NewString()
+	e.usageRecords[modelID] = append(e.usageRecords[modelID], usageRecord{
+		requestID: requestID,
+		timestamp: now,
+		tokens:    estimatedTokens,
+	})
+	return requestID
+}
+
+func (e *Engine) reconcileUsage(modelID, requestID string, actualTokens int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	records := e.usageRecords[modelID]
+	for i := range records {
+		if records[i].requestID != requestID {
+			continue
+		}
+		if actualTokens == 0 {
+			records = append(records[:i], records[i+1:]...)
+			if len(records) == 0 {
+				delete(e.usageRecords, modelID)
+			} else {
+				e.usageRecords[modelID] = records
+			}
+			return
+		}
+		records[i].tokens = actualTokens
+		e.usageRecords[modelID] = records
+		return
+	}
+}
+
+func (e *Engine) markRateLimited(modelID string, until time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.rateLimits[modelID] = until
+}
+
+func (e *Engine) observeStream(modelID, requestID string, estimate tokenEstimate, stream <-chan provider.StreamChunk) <-chan provider.StreamChunk {
+	out := make(chan provider.StreamChunk, 64)
+	go func() {
+		defer close(out)
+		actualTokens := estimate.promptTokens
+		usageReported := false
+		for chunk := range stream {
+			if chunk.Error != nil && isRateLimitError(chunk.Error) {
+				e.markRateLimited(modelID, time.Now().Add(providerRateLimitBackoff))
+			}
+			if chunk.Content != "" && !usageReported {
+				actualTokens += estimateContentTokens(chunk.Content)
+			}
+			if chunk.Usage != nil {
+				actualTokens = chunk.Usage.InputTokens + chunk.Usage.OutputTokens
+				usageReported = true
+			}
+			out <- chunk
+		}
+		e.reconcileUsage(modelID, requestID, actualTokens)
+	}()
+	return out
 }
 
 // messagesToString concatenates all message contents into a single string.
@@ -425,6 +842,309 @@ func messagesToString(msgs []provider.Message) string {
 		sb += msgs[i].ExtractText()
 	}
 	return sb
+}
+
+func messagesForClassification(msgs []provider.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "user" {
+			continue
+		}
+		text := strings.TrimSpace(msgs[i].ExtractText())
+		if text != "" {
+			return text
+		}
+	}
+	return strings.TrimSpace(messagesToString(msgs))
+}
+
+func estimateRequestTokens(req *RouteRequest) tokenEstimate {
+	if req == nil {
+		return tokenEstimate{
+			promptTokens: 1,
+			totalTokens:  defaultCompletionTokenReserve + 1,
+		}
+	}
+
+	promptTokens := 0
+	for i := range req.Messages {
+		text := req.Messages[i].ExtractText()
+		if text == "" {
+			continue
+		}
+		promptTokens += len([]rune(text)) / 4
+	}
+	if promptTokens < 1 {
+		promptTokens = 1
+	}
+
+	completionTokens := req.MaxTokens
+	if completionTokens <= 0 {
+		completionTokens = defaultCompletionTokenReserve
+	}
+
+	return tokenEstimate{
+		promptTokens: promptTokens,
+		totalTokens:  promptTokens + completionTokens,
+	}
+}
+
+func estimateContentTokens(content string) int {
+	tokens := len([]rune(content)) / 4
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "429") || strings.Contains(msg, "rate limit")
+}
+
+func modelTieBreakKey(model *ModelConfig) string {
+	return fmt.Sprintf("%s|%s|%s", model.Name, model.ModelID, model.ID)
+}
+
+func primeStream(stream <-chan provider.StreamChunk) ([]provider.StreamChunk, bool) {
+	for chunk := range stream {
+		if chunk.Error != nil {
+			return []provider.StreamChunk{chunk}, true
+		}
+		if chunk.Content != "" || chunk.Done {
+			return []provider.StreamChunk{chunk}, false
+		}
+	}
+
+	return []provider.StreamChunk{{
+		Error: fmt.Errorf("stream ended before first content"),
+		Done:  true,
+	}}, true
+}
+
+func prependStream(buffered []provider.StreamChunk, stream <-chan provider.StreamChunk) <-chan provider.StreamChunk {
+	out := make(chan provider.StreamChunk, 64)
+	go func() {
+		defer close(out)
+		for _, chunk := range buffered {
+			out <- chunk
+		}
+		for chunk := range stream {
+			out <- chunk
+		}
+	}()
+	return out
+}
+
+func bufferedStream(chunks []provider.StreamChunk) <-chan provider.StreamChunk {
+	out := make(chan provider.StreamChunk, len(chunks))
+	go func() {
+		defer close(out)
+		for _, chunk := range chunks {
+			out <- chunk
+		}
+	}()
+	return out
+}
+
+func chunkErrorMessage(chunks []provider.StreamChunk) string {
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			return chunk.Error.Error()
+		}
+	}
+	return "stream ended before first content"
+}
+
+func eligibleModels(evaluations []candidateEvaluation) []*ModelConfig {
+	models := make([]*ModelConfig, 0, len(evaluations))
+	for _, evaluation := range evaluations {
+		if evaluation.eligible {
+			models = append(models, evaluation.model)
+		}
+	}
+	return models
+}
+
+func diagnosticsFromEvaluations(mode, classificationInput string, classResult *ClassificationResult, estimatedTokens int, evaluations []candidateEvaluation) *RouteDiagnostics {
+	diagnostics := &RouteDiagnostics{
+		Mode:                mode,
+		ClassificationInput: classificationInput,
+		EstimatedTokens:     estimatedTokens,
+	}
+	if classResult != nil {
+		diagnostics.ClassificationMethod = classResult.Method
+		diagnostics.Complexity = classResult.Complexity.String()
+	}
+
+	for _, evaluation := range evaluations {
+		candidate := CandidateDiagnostic{
+			Name:      evaluation.model.Name,
+			ModelID:   evaluation.model.ModelID,
+			Provider:  evaluation.model.Provider,
+			Eligible:  evaluation.eligible,
+			Score:     evaluation.score,
+			Reason:    evaluation.reason,
+			RecentRPM: evaluation.recentRPM,
+			RecentTPM: evaluation.recentTPM,
+			MaxRPM:    evaluation.model.MaxRPM,
+			MaxTPM:    evaluation.model.MaxTPM,
+		}
+		if evaluation.eligible {
+			candidate.Decision = "eligible"
+		} else {
+			candidate.Decision = "skipped"
+		}
+		diagnostics.Candidates = append(diagnostics.Candidates, candidate)
+	}
+
+	diagnostics.Summary = diagnosticsSummary(diagnostics)
+	return diagnostics
+}
+
+func raceDiagnostics(req *RouteRequest, candidates []*ModelConfig) *RouteDiagnostics {
+	diagnostics := &RouteDiagnostics{
+		Mode:            RouteRace.String(),
+		EstimatedTokens: estimateRequestTokens(req).totalTokens,
+	}
+	for _, candidate := range candidates {
+		diagnostics.Candidates = append(diagnostics.Candidates, CandidateDiagnostic{
+			Name:     candidate.Name,
+			ModelID:  candidate.ModelID,
+			Provider: candidate.Provider,
+			Eligible: true,
+			Decision: "eligible",
+		})
+	}
+	diagnostics.Summary = diagnosticsSummary(diagnostics)
+	return diagnostics
+}
+
+func markDiagnosticDecision(candidates []CandidateDiagnostic, modelName, decision, reason string) []CandidateDiagnostic {
+	if modelName == "" {
+		return candidates
+	}
+	for i := range candidates {
+		if candidates[i].Name != modelName {
+			continue
+		}
+		candidates[i].Decision = decision
+		if reason != "" {
+			candidates[i].Reason = reason
+		}
+		return candidates
+	}
+	return candidates
+}
+
+func diagnosticsSummary(diagnostics *RouteDiagnostics) string {
+	if diagnostics == nil {
+		return ""
+	}
+	eligible := 0
+	skipped := 0
+	for _, candidate := range diagnostics.Candidates {
+		if candidate.Eligible {
+			eligible++
+		} else {
+			skipped++
+		}
+	}
+
+	parts := []string{fmt.Sprintf("mode=%s", diagnostics.Mode)}
+	if diagnostics.Complexity != "" {
+		parts = append(parts, fmt.Sprintf("complexity=%s", diagnostics.Complexity))
+	}
+	if diagnostics.ClassificationMethod != "" {
+		parts = append(parts, fmt.Sprintf("method=%s", diagnostics.ClassificationMethod))
+	}
+	if diagnostics.SelectedModel != "" {
+		parts = append(parts, fmt.Sprintf("selected=%s", diagnostics.SelectedModel))
+	}
+	if diagnostics.FallbackUsed {
+		parts = append(parts, "fallback=true")
+	}
+	parts = append(parts, fmt.Sprintf("eligible=%d", eligible))
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("skipped=%d", skipped))
+	}
+	if diagnostics.EstimatedTokens > 0 {
+		parts = append(parts, fmt.Sprintf("estimated_tokens=%d", diagnostics.EstimatedTokens))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func unavailableModelError(evaluations []candidateEvaluation) string {
+	if len(evaluations) == 0 {
+		return "no available model"
+	}
+
+	reasons := make([]string, 0, len(evaluations))
+	for _, evaluation := range evaluations {
+		if evaluation.eligible {
+			continue
+		}
+
+		name := evaluation.model.Name
+		if name == "" {
+			name = evaluation.model.ModelID
+		}
+		reason := evaluation.reason
+		if reason == "" {
+			reason = "filtered out"
+		}
+		reasons = append(reasons, fmt.Sprintf("%s: %s", name, reason))
+	}
+
+	if len(reasons) == 0 {
+		return "no available model"
+	}
+
+	return "no available model: " + strings.Join(reasons, "; ")
+}
+
+func candidateNameByID(candidates []*ModelConfig, modelID string) string {
+	for _, candidate := range candidates {
+		if candidate.ID == modelID {
+			return candidate.Name
+		}
+	}
+	return ""
+}
+
+func errorMessage(result *RouteResult) string {
+	if result == nil {
+		return "route result unavailable"
+	}
+	if result.ErrorMsg != "" {
+		return result.ErrorMsg
+	}
+	return "request failed"
+}
+
+func (d *RouteDiagnostics) HeaderSummary() string {
+	if d == nil {
+		return ""
+	}
+	summary := strings.ReplaceAll(d.Summary, "\n", " ")
+	summary = strings.ReplaceAll(summary, "\r", " ")
+	if len(summary) > 240 {
+		summary = summary[:240]
+	}
+	return summary
+}
+
+func (d *RouteDiagnostics) ToJSON() string {
+	if d == nil {
+		return ""
+	}
+	data, err := json.Marshal(d)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // ListActiveModels returns all active model configurations.

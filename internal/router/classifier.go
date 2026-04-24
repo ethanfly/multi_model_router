@@ -8,11 +8,21 @@ import (
 	"unicode/utf8"
 )
 
+var (
+	codeBlockRe     = regexp.MustCompile("(?s)```.*?```")
+	inlineCodeRe    = regexp.MustCompile("`[^`\n]+`")
+	listMarkerRe    = regexp.MustCompile(`(?m)^\s*(\d+[\.\)]|[-*])\s+`)
+	stackTraceRe    = regexp.MustCompile(`(?i)(traceback|stack trace|panic:|exception|caused by:|fatal:)`)
+	codeSignalRe    = regexp.MustCompile(`(?i)\b(func|function|class|interface|struct|import|select|insert|update|delete|curl|npm|yarn|pnpm|go test|pytest|docker|kubectl|sql|http|json|yaml|regex)\b`)
+	pathSignalRe    = regexp.MustCompile(`(?i)([a-z]:\\|/[\w\-.]+/|[\w\-.]+\.(go|ts|tsx|js|jsx|py|java|rs|sql|yaml|yml|json|md|sh))`)
+	shortGreetingRe = regexp.MustCompile(`(?i)^\s*(hi|hello|hey|thanks|thank you|ok|okay|got it|cool|nice|你好|您好|谢谢|收到|好的)\s*[!.?？。]*\s*$`)
+)
+
 // Complexity represents the complexity level of a question.
 type Complexity int
 
 const (
-	Simple    Complexity = iota
+	Simple Complexity = iota
 	Medium
 	Complex
 	Uncertain
@@ -48,14 +58,14 @@ type ModelAnalyzer interface {
 
 // ClassifierConfig holds configurable parameters for the rule-based classifier.
 type ClassifierConfig struct {
-	ComplexKeywords    []string `json:"complex_keywords"`
-	SimpleKeywords     []string `json:"simple_keywords"`
-	MultiStepKeywords  []string `json:"multi_step_keywords"`
-	MathSymbols        []string `json:"math_symbols"`
-	CodingKeywords     []string `json:"coding_keywords"`
-	ReasoningKeywords  []string `json:"reasoning_keywords"`
-	ComplexThreshold   float64  `json:"complex_threshold"`
-	SimpleThreshold    float64  `json:"simple_threshold"`
+	ComplexKeywords   []string `json:"complex_keywords"`
+	SimpleKeywords    []string `json:"simple_keywords"`
+	MultiStepKeywords []string `json:"multi_step_keywords"`
+	MathSymbols       []string `json:"math_symbols"`
+	CodingKeywords    []string `json:"coding_keywords"`
+	ReasoningKeywords []string `json:"reasoning_keywords"`
+	ComplexThreshold  float64  `json:"complex_threshold"`
+	SimpleThreshold   float64  `json:"simple_threshold"`
 }
 
 // DefaultClassifierConfig returns the built-in default classifier configuration.
@@ -68,12 +78,15 @@ func DefaultClassifierConfig() *ClassifierConfig {
 			"implement a system", "build a", "create a framework",
 			"troubleshoot", "debug", "migrate", "integrate",
 			"best practice", "design pattern", "trade-off", "compare",
+			"distributed", "scalability", "latency", "root cause", "incident",
+			"performance bottleneck", "eventual consistency", "fault tolerance",
 		},
 		SimpleKeywords: []string{
 			"翻译", "总结", "改写", "你好", "谢谢", "是什么", "什么是", "解释一下",
 			"translate", "summarize", "rewrite", "what is", "define", "list",
 			"hello", "hi ", "thanks", "please explain",
 			"how to say", "meaning of", "convert",
+			"paraphrase", "proofread", "fix grammar", "rephrase", "short summary",
 		},
 		MultiStepKeywords: []string{
 			"步骤", "第一步", "首先", "然后", "接下来", "最后", "流程",
@@ -94,6 +107,7 @@ func DefaultClassifierConfig() *ClassifierConfig {
 			"api", "endpoint", "middleware", "handler",
 			"test", "unit test", "integration test", "benchmark",
 			"docker", "kubernetes", "container",
+			"panic", "traceback", "stack trace", "golang", "typescript", "python", "javascript",
 		},
 		ReasoningKeywords: []string{
 			"为什么", "原因", "逻辑", "推理", "因果", "假设",
@@ -101,6 +115,7 @@ func DefaultClassifierConfig() *ClassifierConfig {
 			"hypothesis", "assumption", "therefore", "conclusion",
 			"analyze", "evaluate", "assess", "investigate",
 			"pros and cons", "advantages", "disadvantages",
+			"tradeoff", "which is better", "should i", "why does",
 		},
 		ComplexThreshold: 0.3,
 		SimpleThreshold:  -0.2,
@@ -191,94 +206,89 @@ func (c *Classifier) classifyByRules(question string) *ClassificationResult {
 	score := 0.0
 	cfg := c.config
 
+	trimmed := strings.TrimSpace(question)
+	lowerQ := strings.ToLower(trimmed)
+
 	// Length-based scoring (use rune count for correct CJK handling)
-	length := utf8.RuneCountInString(question)
-	if length < 10 {
-		score -= 0.3
-	} else if length >= 10 && length <= 50 {
-		// no change
-	} else if length > 50 && length <= 150 {
+	length := utf8.RuneCountInString(trimmed)
+	wordCount := len(strings.Fields(lowerQ))
+	switch {
+	case length < 8:
+		score -= 0.35
+	case length < 20:
+		score -= 0.1
+	case length > 150:
+		score += 0.4
+	case length > 50:
 		score += 0.1
-	} else if length > 150 {
-		score += 0.4
 	}
 
-	// Complex keywords (from config)
-	for _, kw := range cfg.ComplexKeywords {
-		if strings.Contains(strings.ToLower(question), strings.ToLower(kw)) {
-			score += 0.35
-			break
-		}
+	if shortGreetingRe.MatchString(trimmed) {
+		score -= 0.55
 	}
 
-	// Simple keywords (from config)
-	for _, kw := range cfg.SimpleKeywords {
-		if strings.Contains(strings.ToLower(question), strings.ToLower(kw)) {
-			score -= 0.35
-			break
-		}
-	}
+	complexHits := keywordHits(lowerQ, cfg.ComplexKeywords)
+	simpleHits := keywordHits(lowerQ, cfg.SimpleKeywords)
+	codingHits := keywordHits(lowerQ, cfg.CodingKeywords)
+	reasoningHits := keywordHits(lowerQ, cfg.ReasoningKeywords)
+	multiStepHits := keywordHits(lowerQ, cfg.MultiStepKeywords)
+	mathHits := rawHits(trimmed, cfg.MathSymbols)
 
-	// Code blocks detection
-	codeBlockRe := regexp.MustCompile("(?s)```.*?```")
-	matches := codeBlockRe.FindAllString(question, -1)
+	score += cappedWeight(complexHits, 0.18, 0.54)
+	score -= cappedWeight(simpleHits, 0.18, 0.54)
+	score += cappedWeight(codingHits, 0.16, 0.48)
+	score += cappedWeight(reasoningHits, 0.14, 0.42)
+	score += cappedWeight(mathHits, 0.2, 0.4)
+
+	matches := codeBlockRe.FindAllString(trimmed, -1)
 	if len(matches) == 1 {
-		score += 0.15
+		score += 0.2
 	} else if len(matches) >= 2 {
-		score += 0.4
+		score += 0.45
 	}
 
-	// Multi-step indicators (from config)
-	multiStepCount := 0
-	lowerQ := strings.ToLower(question)
-	for _, kw := range cfg.MultiStepKeywords {
-		if strings.Contains(lowerQ, strings.ToLower(kw)) {
-			multiStepCount++
-		}
+	if inlineCodeRe.MatchString(trimmed) {
+		score += 0.12
 	}
-	if multiStepCount >= 2 {
+
+	listMarkers := len(listMarkerRe.FindAllString(trimmed, -1))
+	if multiStepHits >= 1 || listMarkers >= 2 {
+		score += 0.12
+	}
+	if multiStepHits >= 2 || listMarkers >= 3 {
 		score += 0.3
 	}
 
-	// Math symbols (from config)
-	for _, sym := range cfg.MathSymbols {
-		if strings.Contains(question, sym) {
-			score += 0.3
-			break
-		}
+	if codeSignalRe.MatchString(trimmed) {
+		score += 0.18
+	}
+	if pathSignalRe.MatchString(trimmed) {
+		score += 0.15
+	}
+	if stackTraceRe.MatchString(trimmed) {
+		score += 0.3
 	}
 
-	// Coding keywords (from config)
-	for _, kw := range cfg.CodingKeywords {
-		if strings.Contains(lowerQ, strings.ToLower(kw)) {
-			score += 0.25
-			break
-		}
-	}
-
-	// Reasoning keywords (from config)
-	for _, kw := range cfg.ReasoningKeywords {
-		if strings.Contains(lowerQ, strings.ToLower(kw)) {
-			score += 0.2
-			break
-		}
+	questionMarks := strings.Count(trimmed, "?") + strings.Count(trimmed, "？")
+	if questionMarks >= 2 {
+		score += 0.12
 	}
 
 	// Chinese + code bonus
 	hasChinese := false
-	for _, r := range question {
+	for _, r := range trimmed {
 		if r >= 0x4e00 && r <= 0x9fff {
 			hasChinese = true
 			break
 		}
 	}
-	hasCode := strings.Contains(question, "func ") ||
-		strings.Contains(question, "function ") ||
-		strings.Contains(question, "class ") ||
-		strings.Contains(question, "import ") ||
-		strings.Contains(question, "```")
+	hasCode := codeBlockRe.MatchString(trimmed) || codeSignalRe.MatchString(trimmed) || pathSignalRe.MatchString(trimmed)
 	if hasChinese && hasCode {
 		score += 0.1
+	}
+
+	if length <= 20 && wordCount <= 4 && simpleHits > 0 && complexHits == 0 && codingHits == 0 {
+		score -= 0.2
 	}
 
 	// Convert score to complexity using configurable thresholds
@@ -292,7 +302,13 @@ func (c *Classifier) classifyByRules(question string) *ClassificationResult {
 	}
 
 	// Calculate confidence
-	confidence := 0.5 + abs(score)*0.3
+	confidence := 0.5 + abs(score)*0.32
+	if complexity == Uncertain {
+		confidence -= 0.05
+	}
+	if confidence < 0.5 {
+		confidence = 0.5
+	}
 	if confidence > 1.0 {
 		confidence = 1.0
 	}
@@ -309,4 +325,40 @@ func abs(x float64) float64 {
 		return -x
 	}
 	return x
+}
+
+func keywordHits(question string, keywords []string) int {
+	count := 0
+	for _, kw := range keywords {
+		kw = strings.TrimSpace(strings.ToLower(kw))
+		if kw == "" {
+			continue
+		}
+		if strings.Contains(question, kw) {
+			count++
+		}
+	}
+	return count
+}
+
+func rawHits(question string, patterns []string) int {
+	count := 0
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		if strings.Contains(question, pattern) {
+			count++
+		}
+	}
+	return count
+}
+
+func cappedWeight(matches int, perMatch, cap float64) float64 {
+	score := float64(matches) * perMatch
+	if score > cap {
+		return cap
+	}
+	return score
 }

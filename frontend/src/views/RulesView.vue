@@ -1,7 +1,7 @@
 <script lang="ts" setup>
-import { ref, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { GetClassifierConfig, SetClassifierConfig } from '../../wailsjs/go/main/App'
+import { GetClassifierConfig, GetDefaultClassifierConfig, SetClassifierConfig } from '../../wailsjs/go/main/App'
 
 const { t } = useI18n()
 
@@ -27,44 +27,64 @@ const simpleThreshold = ref(-0.2)
 const saving = ref(false)
 const message = ref('')
 
+const thresholdError = computed(() =>
+  simpleThreshold.value >= complexThreshold.value ? t('rules.thresholdInvalid') : '',
+)
+
+function applyConfig(cfg: ClassifierConfig) {
+  complexKeywords.value = (cfg.complex_keywords || []).join('\n')
+  simpleKeywords.value = (cfg.simple_keywords || []).join('\n')
+  multiStepKeywords.value = (cfg.multi_step_keywords || []).join('\n')
+  mathSymbols.value = (cfg.math_symbols || []).join('\n')
+  codingKeywords.value = (cfg.coding_keywords || []).join('\n')
+  reasoningKeywords.value = (cfg.reasoning_keywords || []).join('\n')
+  complexThreshold.value = cfg.complex_threshold ?? 0.3
+  simpleThreshold.value = cfg.simple_threshold ?? -0.2
+}
+
+async function loadCurrentConfig() {
+  const raw = await GetClassifierConfig()
+  if (!raw) {
+    return
+  }
+  applyConfig(JSON.parse(raw) as ClassifierConfig)
+}
+
 onMounted(async () => {
   try {
-    const raw = await GetClassifierConfig()
-    if (raw) {
-      const cfg: ClassifierConfig = JSON.parse(raw)
-      complexKeywords.value = (cfg.complex_keywords || []).join('\n')
-      simpleKeywords.value = (cfg.simple_keywords || []).join('\n')
-      multiStepKeywords.value = (cfg.multi_step_keywords || []).join('\n')
-      mathSymbols.value = (cfg.math_symbols || []).join('\n')
-      codingKeywords.value = (cfg.coding_keywords || []).join('\n')
-      reasoningKeywords.value = (cfg.reasoning_keywords || []).join('\n')
-      complexThreshold.value = cfg.complex_threshold ?? 0.3
-      simpleThreshold.value = cfg.simple_threshold ?? -0.2
-    }
-  } catch { /* ignore */ }
+    await loadCurrentConfig()
+  } catch {
+    // Ignore initial load failures to keep the page usable.
+  }
 })
 
 function buildConfig(): ClassifierConfig {
   return {
-    complex_keywords: complexKeywords.value.split('\n').map(s => s.trim()).filter(Boolean),
-    simple_keywords: simpleKeywords.value.split('\n').map(s => s.trim()).filter(Boolean),
-    multi_step_keywords: multiStepKeywords.value.split('\n').map(s => s.trim()).filter(Boolean),
-    math_symbols: mathSymbols.value.split('\n').map(s => s.trim()).filter(Boolean),
-    coding_keywords: codingKeywords.value.split('\n').map(s => s.trim()).filter(Boolean),
-    reasoning_keywords: reasoningKeywords.value.split('\n').map(s => s.trim()).filter(Boolean),
+    complex_keywords: complexKeywords.value.split('\n').map((s) => s.trim()).filter(Boolean),
+    simple_keywords: simpleKeywords.value.split('\n').map((s) => s.trim()).filter(Boolean),
+    multi_step_keywords: multiStepKeywords.value.split('\n').map((s) => s.trim()).filter(Boolean),
+    math_symbols: mathSymbols.value.split('\n').map((s) => s.trim()).filter(Boolean),
+    coding_keywords: codingKeywords.value.split('\n').map((s) => s.trim()).filter(Boolean),
+    reasoning_keywords: reasoningKeywords.value.split('\n').map((s) => s.trim()).filter(Boolean),
     complex_threshold: complexThreshold.value,
     simple_threshold: simpleThreshold.value,
   }
 }
 
 async function handleSave() {
+  if (thresholdError.value) {
+    message.value = thresholdError.value
+    return
+  }
+
   saving.value = true
   message.value = ''
   try {
-    const json = JSON.stringify(buildConfig())
-    await SetClassifierConfig(json)
+    await SetClassifierConfig(JSON.stringify(buildConfig()))
     message.value = t('rules.saved')
-    setTimeout(() => { message.value = '' }, 2000)
+    setTimeout(() => {
+      message.value = ''
+    }, 2000)
   } catch (err: any) {
     message.value = 'Error: ' + (err.message || err)
   } finally {
@@ -72,62 +92,19 @@ async function handleSave() {
   }
 }
 
-function handleReset() {
-  const defaults: ClassifierConfig = {
-    complex_keywords: [
-      '设计', '架构', '推导', '证明', '优化', '重构', '实现', '构建', '部署', '调试',
-      '分析', '评估', '对比', '权衡', '方案', '策略', '模式',
-      'design', 'architect', 'derive', 'prove', 'optimize', 'refactor',
-      'implement a system', 'build a', 'create a framework',
-      'troubleshoot', 'debug', 'migrate', 'integrate',
-      'best practice', 'design pattern', 'trade-off', 'compare',
-    ],
-    simple_keywords: [
-      '翻译', '总结', '改写', '你好', '谢谢', '是什么', '什么是', '解释一下',
-      'translate', 'summarize', 'rewrite', 'what is', 'define', 'list',
-      'hello', 'hi ', 'thanks', 'please explain',
-      'how to say', 'meaning of', 'convert',
-    ],
-    multi_step_keywords: [
-      '步骤', '第一步', '首先', '然后', '接下来', '最后', '流程',
-      'step', 'first,', 'then,', 'finally,', 'next,', 'after that',
-      'workflow', 'pipeline', 'procedure',
-    ],
-    math_symbols: [
-      '∫', '∑', '∂', '∇', '方程', '积分', '微分', '矩阵', '向量',
-      'prove', 'theorem', 'lemma', 'corollary',
-      '∂²', '∞', '≈', '≠', '≤', '≥', '∀', '∃',
-    ],
-    coding_keywords: [
-      '函数', '类', '接口', '算法', '排序', '递归', '并发', '异步',
-      '数据库', '缓存', '索引', '事务', '锁',
-      'function', 'class ', 'interface', 'algorithm', 'sort',
-      'recursion', 'concurrent', 'async', 'await',
-      'database', 'cache', 'index', 'transaction', 'lock',
-      'api', 'endpoint', 'middleware', 'handler',
-      'test', 'unit test', 'integration test', 'benchmark',
-      'docker', 'kubernetes', 'container',
-    ],
-    reasoning_keywords: [
-      '为什么', '原因', '逻辑', '推理', '因果', '假设',
-      'why', 'reason', 'because', 'logic', 'inference',
-      'hypothesis', 'assumption', 'therefore', 'conclusion',
-      'analyze', 'evaluate', 'assess', 'investigate',
-      'pros and cons', 'advantages', 'disadvantages',
-    ],
-    complex_threshold: 0.3,
-    simple_threshold: -0.2,
+async function handleReset() {
+  try {
+    const raw = await GetDefaultClassifierConfig()
+    if (raw) {
+      applyConfig(JSON.parse(raw) as ClassifierConfig)
+    }
+    message.value = t('rules.resetDone')
+    setTimeout(() => {
+      message.value = ''
+    }, 2000)
+  } catch (err: any) {
+    message.value = 'Error: ' + (err.message || err)
   }
-  complexKeywords.value = defaults.complex_keywords.join('\n')
-  simpleKeywords.value = defaults.simple_keywords.join('\n')
-  multiStepKeywords.value = defaults.multi_step_keywords.join('\n')
-  mathSymbols.value = defaults.math_symbols.join('\n')
-  codingKeywords.value = defaults.coding_keywords.join('\n')
-  reasoningKeywords.value = defaults.reasoning_keywords.join('\n')
-  complexThreshold.value = defaults.complex_threshold
-  simpleThreshold.value = defaults.simple_threshold
-  message.value = t('rules.resetDone')
-  setTimeout(() => { message.value = '' }, 2000)
 }
 </script>
 
@@ -135,55 +112,50 @@ function handleReset() {
   <div class="rules-page">
     <div class="page-header">
       <h2 class="page-title">{{ $t('rules.title') }}</h2>
+      <p class="page-subtitle">{{ $t('rules.subtitle') }}</p>
     </div>
 
     <div class="rules-grid">
-      <!-- Complex Keywords -->
       <div class="rule-card">
         <label class="rule-label">{{ $t('rules.complexKeywords') }}</label>
         <p class="rule-desc">{{ $t('rules.complexKeywordsDesc') }}</p>
         <textarea v-model="complexKeywords" rows="6" class="rule-textarea"></textarea>
       </div>
 
-      <!-- Simple Keywords -->
       <div class="rule-card">
         <label class="rule-label">{{ $t('rules.simpleKeywords') }}</label>
         <p class="rule-desc">{{ $t('rules.simpleKeywordsDesc') }}</p>
         <textarea v-model="simpleKeywords" rows="6" class="rule-textarea"></textarea>
       </div>
 
-      <!-- Coding Keywords -->
       <div class="rule-card">
         <label class="rule-label">{{ $t('rules.codingKeywords') }}</label>
         <p class="rule-desc">{{ $t('rules.codingKeywordsDesc') }}</p>
         <textarea v-model="codingKeywords" rows="5" class="rule-textarea"></textarea>
       </div>
 
-      <!-- Reasoning Keywords -->
       <div class="rule-card">
         <label class="rule-label">{{ $t('rules.reasoningKeywords') }}</label>
         <p class="rule-desc">{{ $t('rules.reasoningKeywordsDesc') }}</p>
         <textarea v-model="reasoningKeywords" rows="5" class="rule-textarea"></textarea>
       </div>
 
-      <!-- Multi-step Keywords -->
       <div class="rule-card">
         <label class="rule-label">{{ $t('rules.multiStepKeywords') }}</label>
         <p class="rule-desc">{{ $t('rules.multiStepKeywordsDesc') }}</p>
         <textarea v-model="multiStepKeywords" rows="4" class="rule-textarea"></textarea>
       </div>
 
-      <!-- Math Symbols -->
       <div class="rule-card">
         <label class="rule-label">{{ $t('rules.mathSymbols') }}</label>
         <p class="rule-desc">{{ $t('rules.mathSymbolsDesc') }}</p>
         <textarea v-model="mathSymbols" rows="4" class="rule-textarea"></textarea>
       </div>
 
-      <!-- Thresholds -->
       <div class="rule-card thresholds-card">
         <label class="rule-label">{{ $t('rules.thresholds') }}</label>
         <p class="rule-desc">{{ $t('rules.thresholdHint') }}</p>
+        <p v-if="thresholdError" class="rule-warning">{{ thresholdError }}</p>
         <div class="threshold-row">
           <div class="threshold-field">
             <span class="threshold-name">{{ $t('rules.complexThreshold') }}</span>
@@ -200,7 +172,7 @@ function handleReset() {
     <div v-if="message" class="save-message">{{ message }}</div>
 
     <div class="actions">
-      <button @click="handleSave" :disabled="saving" class="btn btn-save">
+      <button @click="handleSave" :disabled="saving || !!thresholdError" class="btn btn-save">
         {{ saving ? '...' : $t('rules.save') }}
       </button>
       <button @click="handleReset" class="btn btn-reset">{{ $t('rules.reset') }}</button>
@@ -230,6 +202,13 @@ function handleReset() {
   background-clip: text;
 }
 
+.page-subtitle {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
 .rules-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -250,17 +229,23 @@ function handleReset() {
 }
 
 .rule-label {
+  display: block;
+  margin-bottom: 4px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
-  display: block;
-  margin-bottom: 4px;
 }
 
 .rule-desc {
+  margin: 0 0 10px;
   font-size: 12px;
   color: var(--text-muted);
-  margin: 0 0 10px 0;
+}
+
+.rule-warning {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--warning);
 }
 
 .rule-textarea {
@@ -295,8 +280,8 @@ function handleReset() {
 
 .threshold-name {
   font-size: 12px;
-  color: var(--text-muted);
   font-weight: 500;
+  color: var(--text-muted);
 }
 
 .threshold-field input {
@@ -371,6 +356,7 @@ function handleReset() {
   .rules-grid {
     grid-template-columns: 1fr;
   }
+
   .thresholds-card {
     grid-column: span 1;
   }

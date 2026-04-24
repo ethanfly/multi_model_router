@@ -30,6 +30,10 @@ export function GetDashboardStats() {
   return window['go']['main']['App']['GetDashboardStats']();
 }
 
+export function GetDefaultClassifierConfig() {
+  return window['go']['main']['App']['GetDefaultClassifierConfig']();
+}
+
 export function GetModels() {
   return window['go']['main']['App']['GetModels']();
 }

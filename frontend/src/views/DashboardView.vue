@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { GetDashboardStats, GetDashboardLogs } from '../../wailsjs/go/main/App'
+import RouteDiagnosticsCard from '../components/RouteDiagnosticsCard.vue'
 
 interface ModelUsage {
   modelId: string
@@ -16,6 +17,8 @@ interface LogEntry {
   source: string
   tokens: number
   latency: number
+  diagnostics: string
+  diagnosticsJson: string
 }
 
 interface DashboardStats {
@@ -39,6 +42,7 @@ const logPage = ref(1)
 const logPageSize = 15
 const logTotal = ref(0)
 const logLoading = ref(false)
+const logError = ref('')
 const totalPages = computed(() => Math.max(1, Math.ceil(logTotal.value / logPageSize)))
 
 onMounted(async () => {
@@ -76,19 +80,31 @@ async function loadStats() {
 
 async function loadLogs() {
   logLoading.value = true
+  logError.value = ''
   try {
     const raw: any = await GetDashboardLogs(logPage.value, logPageSize)
     logTotal.value = raw.total || 0
-    const mapped: LogEntry[] = (raw.logs || []).map((l: any) => ({
-      time: l.createdAt ? new Date(l.createdAt).toLocaleString() : '',
-      model: l.modelId || '',
-      complexity: l.complexity || '',
-      source: l.source || '',
-      tokens: (l.tokensIn || 0) + (l.tokensOut || 0),
-      latency: l.latencyMs || 0,
+    const rawLogs = Array.isArray(raw?.logs)
+      ? raw.logs
+      : raw?.logs && typeof raw.logs === 'object'
+        ? Object.values(raw.logs)
+        : []
+    const mapped: LogEntry[] = rawLogs.map((l: any) => ({
+      time: formatLogTime(l.createdAt ?? l.CreatedAt),
+      model: l.modelId ?? l.ModelID ?? '',
+      complexity: l.complexity ?? l.Complexity ?? '',
+      source: l.source ?? l.Source ?? '',
+      tokens: Number(l.tokensIn ?? l.TokensIn ?? 0) + Number(l.tokensOut ?? l.TokensOut ?? 0),
+      latency: Number(l.latencyMs ?? l.LatencyMs ?? 0),
+      diagnostics: l.diagnostics ?? l.Diagnostics ?? '',
+      diagnosticsJson: l.diagnosticsJson ?? l.DiagnosticsJSON ?? '',
     }))
     logs.value = mapped
-  } catch { /* ignore */ } finally {
+  } catch (err: any) {
+    console.error('Failed to load dashboard logs', err)
+    logError.value = err?.message || 'Failed to load logs'
+    logs.value = []
+  } finally {
     logLoading.value = false
   }
 }
@@ -114,6 +130,17 @@ function complexityColor(c: string): string {
     case 'complex': return 'var(--error)'
     default: return 'var(--text-muted)'
   }
+}
+
+function formatLogTime(value: unknown): string {
+  if (!value) {
+    return ''
+  }
+  const date = new Date(String(value))
+  if (Number.isNaN(date.getTime())) {
+    return String(value)
+  }
+  return date.toLocaleString()
 }
 </script>
 
@@ -211,6 +238,7 @@ function complexityColor(c: string): string {
                 <th>{{ $t('dashboard.colSource') }}</th>
                 <th>{{ $t('dashboard.colTokens') }}</th>
                 <th>{{ $t('dashboard.colLatency') }}</th>
+                <th>Decision</th>
               </tr>
             </thead>
             <tbody>
@@ -224,9 +252,19 @@ function complexityColor(c: string): string {
                 <td>{{ log.source }}</td>
                 <td>{{ log.tokens }}</td>
                 <td>{{ log.latency }}ms</td>
+                <td class="diagnostics-cell">
+                  <RouteDiagnosticsCard
+                    v-if="log.diagnostics || log.diagnosticsJson"
+                    :summary="log.diagnostics"
+                    :diagnostics-json="log.diagnosticsJson"
+                    title="Decision"
+                  />
+                  <span v-else>—</span>
+                </td>
               </tr>
             </tbody>
           </table>
+          <div v-else-if="logError" class="no-data">{{ logError }}</div>
           <div v-else class="no-data">{{ $t('dashboard.noLogs') }}</div>
         </div>
       </div>
@@ -551,6 +589,15 @@ tbody tr:hover {
 td {
   color: var(--text-secondary);
   border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+}
+
+.diagnostics-cell {
+  min-width: 320px;
+  max-width: 420px;
+  white-space: normal;
+  line-height: 1.45;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .complexity-dot {

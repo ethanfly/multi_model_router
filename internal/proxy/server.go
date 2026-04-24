@@ -30,17 +30,23 @@ type ProviderResolver interface {
 	ResolveProvider(modelRef string) (router.ProviderInfo, bool)
 }
 
+type SelectionExplainer interface {
+	ExplainSelection(ctx context.Context, req *router.RouteRequest) *router.SelectionResult
+}
+
 // RequestLogEntry is the data passed to the OnRequestLog callback after each request.
 type RequestLogEntry struct {
-	ModelName  string
-	Source     string
-	Complexity int64
-	RouteMode  string
-	Status     string
-	TokensIn   int
-	TokensOut  int
-	LatencyMs  int64
-	ErrorMsg   string
+	ModelName       string
+	Source          string
+	Complexity      int64
+	RouteMode       string
+	Status          string
+	TokensIn        int
+	TokensOut       int
+	LatencyMs       int64
+	ErrorMsg        string
+	Diagnostics     string
+	DiagnosticsJSON string
 }
 
 // Server is a local HTTP proxy that accepts OpenAI-compatible and Anthropic-compatible
@@ -57,10 +63,12 @@ type Server struct {
 
 // requestStats tracks metrics during response writing.
 type requestStats struct {
-	tokensIn  int
-	tokensOut int
-	status    string // "success" or "error"
-	errMsg    string
+	tokensIn        int
+	tokensOut       int
+	status          string // "success" or "error"
+	errMsg          string
+	diagnostics     string
+	diagnosticsJSON string
 }
 
 // New creates a new proxy Server listening on the given port with a default route mode.
@@ -70,7 +78,12 @@ func New(port int, r Router, mode router.RouteMode, apiKey string) *Server {
 		router:      r,
 		defaultMode: mode,
 		apiKey:      apiKey,
-		httpClient:  &http.Client{Timeout: 5 * time.Minute},
+		httpClient: &http.Client{
+			Timeout: 5 * time.Minute,
+			Transport: &http.Transport{
+				DisableCompression: true,
+			},
+		},
 	}
 }
 
@@ -121,6 +134,54 @@ func (s *Server) Stop() error {
 // Port returns the port the server is configured to listen on.
 func (s *Server) Port() int {
 	return s.port
+}
+
+// requestHeadersToSkip are headers that must NOT be copied when forwarding REQUEST headers.
+// Go's http client manages these automatically; copying them causes mismatches
+// (e.g. wrong Content-Length after body modification → empty upstream response).
+var requestHeadersToSkip = map[string]bool{
+	"Content-Length":    true,
+	"Content-Encoding":  true,
+	"Accept-Encoding":   true,
+	"Transfer-Encoding": true,
+	"Connection":        true,
+	"Keep-Alive":        true,
+	"Upgrade":           true,
+	"Host":              true,
+}
+
+// responseHeadersToSkip are headers to skip when copying RESPONSE headers.
+// Content-Length is stripped because Go's Transport may decode the upstream
+// body (e.g. unchunk) causing the forwarded Content-Length to mismatch the
+// actual bytes written. Let Go's ResponseWriter handle framing instead.
+// Content-Encoding is kept so clients can correctly decompress responses.
+var responseHeadersToSkip = map[string]bool{
+	"Content-Length":    true,
+	"Transfer-Encoding": true,
+	"Connection":        true,
+	"Keep-Alive":        true,
+	"Upgrade":           true,
+}
+
+// copyRequestHeaders copies headers from src to dst, skipping auto-managed request headers.
+func copyRequestHeaders(dst http.Header, src http.Header) {
+	for k, vv := range src {
+		if requestHeadersToSkip[k] {
+			continue
+		}
+		dst[k] = vv
+	}
+}
+
+// copyResponseHeaders copies headers from src to dst, skipping only hop-by-hop headers.
+// Preserves Content-Length and Content-Encoding for correct client-side parsing.
+func copyResponseHeaders(dst http.Header, src http.Header) {
+	for k, vv := range src {
+		if responseHeadersToSkip[k] {
+			continue
+		}
+		dst[k] = vv
+	}
 }
 
 // ---- Models Endpoint ----
@@ -209,8 +270,10 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bodyBytes = rewritePassthroughModel(bodyBytes, info.ModelID)
+
 	// Build upstream URL
-	targetURL := strings.TrimSuffix(info.BaseURL, "/") + r.URL.Path
+	targetURL := buildUpstreamURL(info.BaseURL, r.URL.Path, r.URL.RawQuery)
 
 	// Create forwarded request
 	var bodyReader io.Reader
@@ -223,10 +286,8 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy original headers
-	for k, vv := range r.Header {
-		proxyReq.Header[k] = vv
-	}
+	// Copy original headers (skip Content-Length/Host to avoid body mismatch)
+	copyRequestHeaders(proxyReq.Header, r.Header)
 
 	// Set auth based on provider type
 	switch info.Provider {
@@ -248,20 +309,18 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
+	// Copy response headers (skip Content-Length/Encoding to avoid mismatch)
+	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
 	// Stream response body back
 	flusher, canFlush := w.(http.Flusher)
 	buf := make([]byte, 32*1024)
+	var totalBytes int
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			totalBytes += n
 			w.Write(buf[:n])
 			if canFlush {
 				flusher.Flush()
@@ -271,6 +330,45 @@ func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+
+	log.Printf("passthrough response: status=%d bytes=%d path=%s", resp.StatusCode, totalBytes, r.URL.Path)
+}
+
+func buildUpstreamURL(baseURL, requestPath, rawQuery string) string {
+	targetURL := strings.TrimSuffix(baseURL, "/")
+	upstreamPath := strings.TrimPrefix(requestPath, "/v1")
+	if upstreamPath == "" {
+		upstreamPath = "/"
+	}
+	if !strings.HasPrefix(upstreamPath, "/") {
+		upstreamPath = "/" + upstreamPath
+	}
+	targetURL += upstreamPath
+	if rawQuery != "" {
+		targetURL += "?" + rawQuery
+	}
+	return targetURL
+}
+
+func rewritePassthroughModel(body []byte, modelID string) []byte {
+	if len(body) == 0 || modelID == "" {
+		return body
+	}
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if _, ok := payload["model"]; !ok {
+		return body
+	}
+
+	payload["model"], _ = json.Marshal(modelID)
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return rewritten
 }
 
 // ---- Chat Completion Endpoint ----
@@ -326,38 +424,57 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse into raw map to preserve ALL fields (tools, tool_choice, thinking, etc.)
+	// Minimal parse: only extract model and messages for routing
+	var modelField string
+	var providerMsgs []provider.Message
+
 	var reqMap map[string]json.RawMessage
 	if err := json.Unmarshal(body, &reqMap); err != nil {
-		if isAnthropic {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"type":  "error",
-				"error": map[string]string{"type": "invalid_request_error", "message": "invalid JSON"},
-			})
-		} else {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		// Can't parse JSON at all — try blind passthrough using default route
+		mode := s.defaultMode
+		if h := r.Header.Get("X-Router-Mode"); h != "" {
+			mode = router.RouteModeFromString(h)
 		}
+
+		type modelSelector interface {
+			SelectModel(ctx context.Context, req *router.RouteRequest) (*router.ModelConfig, int64, string)
+		}
+		selector, ok := s.router.(modelSelector)
+		if !ok {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "router does not support model selection"})
+			return
+		}
+
+		modelCfg, complexity, errMsg := selector.SelectModel(r.Context(), &router.RouteRequest{
+			Messages: nil,
+			Mode:     mode,
+			ModelID:  "",
+		})
+		if modelCfg == nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": errMsg})
+			return
+		}
+
+		s.forwardRawRequest(w, r, body, modelCfg, complexity, mode)
 		return
 	}
 
-	// Extract fields needed for routing only
-	var modelField string
+	// Extract model
 	if raw, ok := reqMap["model"]; ok {
 		json.Unmarshal(raw, &modelField)
 	}
 
+	// Extract messages for complexity classification
 	var msgs []proxyMessage
 	if raw, ok := reqMap["messages"]; ok {
 		json.Unmarshal(raw, &msgs)
 	}
-
 	var systemText string
 	if raw, ok := reqMap["system"]; ok {
 		systemText = extractSystemText(raw)
 	}
 
-	// Build messages for classification
-	providerMsgs := make([]provider.Message, 0, len(msgs)+1)
+	providerMsgs = make([]provider.Message, 0, len(msgs)+1)
 	if isAnthropic && systemText != "" {
 		providerMsgs = append(providerMsgs, provider.Message{Role: "system", Content: systemText})
 	}
@@ -378,7 +495,6 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		mode = router.RouteModeFromString(h)
 	}
 
-	// Select model via router (raw passthrough — no intermediate serialization)
 	type modelSelector interface {
 		SelectModel(ctx context.Context, req *router.RouteRequest) (*router.ModelConfig, int64, string)
 	}
@@ -389,11 +505,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modelCfg, complexity, errMsg := selector.SelectModel(r.Context(), &router.RouteRequest{
+	routeReq := &router.RouteRequest{
 		Messages: providerMsgs,
 		Mode:     mode,
 		ModelID:  modelField,
-	})
+	}
+	modelCfg, complexity, errMsg := selector.SelectModel(r.Context(), routeReq)
+	decisionSummary := ""
+	decisionJSON := ""
 	if modelCfg == nil {
 		if isAnthropic {
 			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
@@ -406,12 +525,41 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if explainer, ok := s.router.(SelectionExplainer); ok {
+		if selection := explainer.ExplainSelection(r.Context(), routeReq); selection != nil && selection.Diagnostics != nil {
+			decisionSummary = selection.Diagnostics.HeaderSummary()
+			decisionJSON = selection.Diagnostics.ToJSON()
+			w.Header().Set("X-Router-Decision", decisionSummary)
+		}
+	}
+
+	// Replace model, then sanitize/cross-convert for the target provider
+	reqMap["model"], _ = json.Marshal(modelCfg.ModelID)
+	isTargetAnthropic := modelCfg.Provider == "anthropic"
+	convertToolsForUpstream(reqMap, isAnthropic, isTargetAnthropic)
+	convertToolChoiceForUpstream(reqMap, isAnthropic, isTargetAnthropic)
+	convertSystemForUpstream(reqMap, isAnthropic, isTargetAnthropic)
+	sanitizeForProvider(reqMap, modelCfg.Provider)
+	stripThinkingBlocks(reqMap, isTargetAnthropic)
+	ensureMaxTokens(reqMap, isTargetAnthropic)
+	upstreamBody, _ := json.Marshal(reqMap)
+
+	s.forwardUpstream(w, r, upstreamBody, modelCfg, complexity, mode, decisionSummary, decisionJSON)
+}
+
+// forwardRawRequest forwards the raw body bytes without any JSON manipulation.
+func (s *Server) forwardRawRequest(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode) {
+	s.forwardUpstream(w, r, body, modelCfg, complexity, mode, "", "")
+}
+
+// forwardUpstream sends the prepared body to the upstream provider and streams
+// the response back to the client byte-for-byte.
+func (s *Server) forwardUpstream(w http.ResponseWriter, r *http.Request, body []byte, modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, decisionSummary, decisionJSON string) {
 	w.Header().Set("X-Router-Model", modelCfg.Name)
 	w.Header().Set("X-Router-Complexity", fmt.Sprintf("%d", complexity))
-
-	// Replace model in raw body with upstream model ID, preserving all other fields
-	reqMap["model"], _ = json.Marshal(modelCfg.ModelID)
-	upstreamBody, _ := json.Marshal(reqMap)
+	if decisionSummary != "" {
+		w.Header().Set("X-Router-Decision", decisionSummary)
+	}
 
 	// Build upstream URL based on provider type
 	var upstreamPath string
@@ -422,17 +570,14 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	targetURL := strings.TrimSuffix(modelCfg.BaseURL, "/") + upstreamPath
 
-	// Create upstream request
-	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(upstreamBody))
+	proxyReq, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create upstream request"})
 		return
 	}
 
-	// Copy all client headers (preserves anthropic-beta, content-type, etc.)
-	for k, vv := range r.Header {
-		proxyReq.Header[k] = vv
-	}
+	// Copy client headers as-is
+	copyRequestHeaders(proxyReq.Header, r.Header)
 	proxyReq.Header.Set("Content-Type", "application/json")
 
 	// Set auth based on provider type
@@ -448,9 +593,11 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		proxyReq.Header.Del("x-api-key")
 	}
 
-	// Forward to upstream
 	start := time.Now()
-	var rs requestStats
+	rs := requestStats{
+		diagnostics:     decisionSummary,
+		diagnosticsJSON: decisionJSON,
+	}
 
 	resp, err := s.httpClient.Do(proxyReq)
 	if err != nil {
@@ -463,20 +610,47 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers from upstream
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
+	if resp.StatusCode >= 400 {
+		bodyPreview := string(body)
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500] + "..."
 		}
+		log.Printf("upstream %d from %s (model=%s): %s", resp.StatusCode, targetURL, modelCfg.ModelID, bodyPreview)
 	}
+
+	// Read first chunk to detect empty responses before committing status code
+	buf := make([]byte, 32*1024)
+	firstN, firstErr := resp.Body.Read(buf)
+
+	if firstN == 0 && firstErr != nil && resp.StatusCode < 400 {
+		// Upstream returned success status but empty body — return 502 so client retries
+		log.Printf("upstream returned %d with empty body url=%s", resp.StatusCode, targetURL)
+		rs.status = "error"
+		rs.errMsg = "upstream returned empty response"
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream returned empty response"})
+		s.logRequest(modelCfg, complexity, mode, &rs, time.Since(start).Milliseconds())
+		return
+	}
+
+	// Copy response headers from upstream (Content-Length stripped to avoid mismatch)
+	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
-	// Stream response body back to client
+	// Write first chunk and stream remaining body
 	flusher, canFlush := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
+	var totalBytes int
+	if firstN > 0 {
+		totalBytes += firstN
+		w.Write(buf[:firstN])
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
+			totalBytes += n
 			w.Write(buf[:n])
 			if canFlush {
 				flusher.Flush()
@@ -487,7 +661,9 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Stats
+	log.Printf("upstream response: status=%d bytes=%d content-type=%s url=%s",
+		resp.StatusCode, totalBytes, resp.Header.Get("Content-Type"), targetURL)
+
 	if resp.StatusCode >= 400 {
 		rs.status = "error"
 	} else {
@@ -499,15 +675,17 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logRequest(modelCfg *router.ModelConfig, complexity int64, mode router.RouteMode, rs *requestStats, latencyMs int64) {
 	if s.OnRequestLog != nil && rs.status != "" {
 		s.OnRequestLog(&RequestLogEntry{
-			ModelName:  modelCfg.Name,
-			Source:     "proxy",
-			Complexity: complexity,
-			RouteMode:  mode.String(),
-			Status:     rs.status,
-			TokensIn:   rs.tokensIn,
-			TokensOut:  rs.tokensOut,
-			LatencyMs:  latencyMs,
-			ErrorMsg:   rs.errMsg,
+			ModelName:       modelCfg.Name,
+			Source:          "proxy",
+			Complexity:      complexity,
+			RouteMode:       mode.String(),
+			Status:          rs.status,
+			TokensIn:        rs.tokensIn,
+			TokensOut:       rs.tokensOut,
+			LatencyMs:       latencyMs,
+			ErrorMsg:        rs.errMsg,
+			Diagnostics:     rs.diagnostics,
+			DiagnosticsJSON: rs.diagnosticsJSON,
 		})
 	}
 }
@@ -819,6 +997,330 @@ func (s *Server) writeAnthropicNonStream(w http.ResponseWriter, result *router.R
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---- Tools Format Conversion ----
+
+// convertToolsForUpstream converts the tools array between Anthropic and OpenAI
+// formats when the request crosses provider types.
+//
+//	Anthropic: [{"name":"x","description":"...","input_schema":{...}}]
+//	OpenAI:    [{"type":"function","function":{"name":"x","description":"...","parameters":{...}}}]
+func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropic, isTargetAnthropic bool) {
+	if isSourceAnthropic == isTargetAnthropic {
+		return
+	}
+
+	toolsRaw, ok := reqMap["tools"]
+	if !ok {
+		return
+	}
+
+	var tools []json.RawMessage
+	if err := json.Unmarshal(toolsRaw, &tools); err != nil || len(tools) == 0 {
+		return
+	}
+
+	var converted []json.RawMessage
+
+	for _, raw := range tools {
+		var tool map[string]json.RawMessage
+		if json.Unmarshal(raw, &tool) != nil {
+			continue
+		}
+
+		if isSourceAnthropic {
+			// Anthropic → OpenAI: wrap fields under "function"
+			fn := make(map[string]json.RawMessage)
+			for _, k := range []string{"name", "description"} {
+				if v, ok := tool[k]; ok {
+					fn[k] = v
+				}
+			}
+			if v, ok := tool["input_schema"]; ok {
+				fn["parameters"] = v
+			}
+			fnJSON, _ := json.Marshal(fn)
+			out := map[string]json.RawMessage{
+				"type":     json.RawMessage(`"function"`),
+				"function": json.RawMessage(fnJSON),
+			}
+			outJSON, _ := json.Marshal(out)
+			converted = append(converted, json.RawMessage(outJSON))
+		} else {
+			// OpenAI → Anthropic: unwrap "function"
+			fnRaw, ok := tool["function"]
+			if !ok {
+				continue
+			}
+			var fn map[string]json.RawMessage
+			if json.Unmarshal(fnRaw, &fn) != nil {
+				continue
+			}
+			out := make(map[string]json.RawMessage)
+			for _, k := range []string{"name", "description"} {
+				if v, ok := fn[k]; ok {
+					out[k] = v
+				}
+			}
+			if v, ok := fn["parameters"]; ok {
+				out["input_schema"] = v
+			}
+			outJSON, _ := json.Marshal(out)
+			converted = append(converted, json.RawMessage(outJSON))
+		}
+	}
+
+	if len(converted) > 0 {
+		arrJSON, _ := json.Marshal(converted)
+		reqMap["tools"] = json.RawMessage(arrJSON)
+	}
+}
+
+// convertToolChoiceForUpstream converts tool_choice between Anthropic and OpenAI formats.
+//
+//	OpenAI:    "auto" | "none" | "required" | {"type":"function","function":{"name":"x"}}
+//	Anthropic: {"type":"auto"} | {"type":"none"} | {"type":"any"} | {"type":"tool","name":"x"}
+func convertToolChoiceForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropic, isTargetAnthropic bool) {
+	if isSourceAnthropic == isTargetAnthropic {
+		return
+	}
+
+	tcRaw, ok := reqMap["tool_choice"]
+	if !ok {
+		return
+	}
+
+	if isSourceAnthropic {
+		// Anthropic object → OpenAI string or object
+		var tc map[string]json.RawMessage
+		if json.Unmarshal(tcRaw, &tc) != nil {
+			return
+		}
+		var tcType string
+		json.Unmarshal(tc["type"], &tcType)
+		switch tcType {
+		case "auto":
+			reqMap["tool_choice"] = json.RawMessage(`"auto"`)
+		case "none":
+			reqMap["tool_choice"] = json.RawMessage(`"none"`)
+		case "any":
+			reqMap["tool_choice"] = json.RawMessage(`"required"`)
+		case "tool":
+			if name := tc["name"]; name != nil {
+				reqMap["tool_choice"] = json.RawMessage(
+					`{"type":"function","function":{"name":` + string(name) + `}}`,
+				)
+			}
+		}
+	} else {
+		// OpenAI string or object → Anthropic object
+		var s string
+		if json.Unmarshal(tcRaw, &s) == nil {
+			switch s {
+			case "auto":
+				reqMap["tool_choice"] = json.RawMessage(`{"type":"auto"}`)
+			case "none":
+				reqMap["tool_choice"] = json.RawMessage(`{"type":"none"}`)
+			case "required":
+				reqMap["tool_choice"] = json.RawMessage(`{"type":"any"}`)
+			}
+			return
+		}
+		var tc map[string]json.RawMessage
+		if json.Unmarshal(tcRaw, &tc) == nil {
+			var tcType string
+			json.Unmarshal(tc["type"], &tcType)
+			if tcType == "function" {
+				if fnRaw := tc["function"]; fnRaw != nil {
+					var fn map[string]json.RawMessage
+					if json.Unmarshal(fnRaw, &fn) == nil {
+						if name := fn["name"]; name != nil {
+							reqMap["tool_choice"] = json.RawMessage(
+								`{"type":"tool","name":` + string(name) + `}`,
+							)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// ---- Provider Field Sanitization ----
+
+// openAIFields are fields accepted by OpenAI-compatible chat completion APIs.
+var openAIFields = map[string]bool{
+	"model": true, "messages": true, "max_tokens": true, "max_completion_tokens": true,
+	"temperature": true, "top_p": true, "n": true, "stream": true, "stream_options": true,
+	"stop": true, "presence_penalty": true, "frequency_penalty": true,
+	"logit_bias": true, "user": true, "response_format": true, "seed": true,
+	"tools": true, "tool_choice": true, "parallel_tool_calls": true,
+	"logprobs": true, "top_logprobs": true, "reasoning_effort": true,
+}
+
+// anthropicFields are fields accepted by the Anthropic messages API.
+var anthropicFields = map[string]bool{
+	"model": true, "messages": true, "max_tokens": true,
+	"temperature": true, "top_p": true, "top_k": true, "stream": true,
+	"stop_sequences": true, "system": true, "tools": true,
+	"tool_choice": true, "thinking": true, "metadata": true,
+}
+
+// sanitizeForProvider removes fields that the target provider doesn't support.
+func sanitizeForProvider(reqMap map[string]json.RawMessage, provider string) {
+	allowed := openAIFields
+	if provider == "anthropic" {
+		allowed = anthropicFields
+	}
+	for k := range reqMap {
+		if !allowed[k] {
+			delete(reqMap, k)
+		}
+	}
+}
+
+// stripThinkingBlocks removes Anthropic "thinking" content blocks from messages
+// when forwarding to providers that don't support them (e.g. OpenAI-compatible APIs).
+func stripThinkingBlocks(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
+	if isTargetAnthropic {
+		return
+	}
+
+	msgsRaw, ok := reqMap["messages"]
+	if !ok {
+		return
+	}
+
+	var msgs []json.RawMessage
+	if json.Unmarshal(msgsRaw, &msgs) != nil {
+		return
+	}
+
+	modified := false
+	for i, msgRaw := range msgs {
+		var msg struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(msgRaw, &msg) != nil {
+			continue
+		}
+
+		// Content might be a string (no blocks to strip) or an array of blocks
+		var blocks []map[string]json.RawMessage
+		if json.Unmarshal(msg.Content, &blocks) != nil {
+			continue // string content, nothing to strip
+		}
+
+		var filtered []map[string]json.RawMessage
+		for _, block := range blocks {
+			var blockType string
+			json.Unmarshal(block["type"], &blockType)
+			if blockType != "thinking" {
+				filtered = append(filtered, block)
+			}
+		}
+
+		if len(filtered) < len(blocks) {
+			modified = true
+			filteredRaw, _ := json.Marshal(filtered)
+			// Rebuild the message with filtered content
+			var msgMap map[string]json.RawMessage
+			json.Unmarshal(msgRaw, &msgMap)
+			msgMap["content"] = filteredRaw
+			msgs[i], _ = json.Marshal(msgMap)
+		}
+	}
+
+	if modified {
+		reqMap["messages"], _ = json.Marshal(msgs)
+	}
+}
+
+// convertSystemForUpstream handles the system field when crossing provider types.
+// Anthropic uses a top-level "system" field; OpenAI includes system messages in "messages".
+func convertSystemForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropic, isTargetAnthropic bool) {
+	if isSourceAnthropic == isTargetAnthropic {
+		return
+	}
+
+	if isSourceAnthropic && !isTargetAnthropic {
+		// Anthropic → OpenAI: move top-level "system" into messages[0] as system role
+		sysRaw, ok := reqMap["system"]
+		if !ok || len(sysRaw) == 0 {
+			return
+		}
+		sysText := extractSystemText(sysRaw)
+		if sysText == "" {
+			delete(reqMap, "system")
+			return
+		}
+
+		// Prepend system message to messages array
+		var msgs []json.RawMessage
+		if raw, ok := reqMap["messages"]; ok {
+			json.Unmarshal(raw, &msgs)
+		}
+		sysMsg, _ := json.Marshal(map[string]string{"role": "system", "content": sysText})
+		msgs = append([]json.RawMessage{sysMsg}, msgs...)
+		reqMap["messages"], _ = json.Marshal(msgs)
+		delete(reqMap, "system")
+	}
+
+	if !isSourceAnthropic && isTargetAnthropic {
+		// OpenAI → Anthropic: extract system messages into top-level "system"
+		var msgs []map[string]json.RawMessage
+		if raw, ok := reqMap["messages"]; ok {
+			json.Unmarshal(raw, &msgs)
+		}
+		var systemTexts []string
+		var remaining []map[string]json.RawMessage
+		for _, m := range msgs {
+			var role string
+			json.Unmarshal(m["role"], &role)
+			if role == "system" {
+				var content string
+				json.Unmarshal(m["content"], &content)
+				systemTexts = append(systemTexts, content)
+			} else {
+				remaining = append(remaining, m)
+			}
+		}
+		if len(systemTexts) > 0 {
+			sysText := strings.Join(systemTexts, "\n")
+			reqMap["system"], _ = json.Marshal(sysText)
+			reqMap["messages"], _ = json.Marshal(remaining)
+		}
+	}
+}
+
+// ensureMaxTokens validates and fixes max_tokens for the target provider.
+func ensureMaxTokens(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
+	if raw, ok := reqMap["max_tokens"]; ok {
+		var mt int
+		if json.Unmarshal(raw, &mt) == nil && mt <= 0 {
+			delete(reqMap, "max_tokens")
+		}
+	}
+	// max_completion_tokens → max_tokens for non-OpenAI providers
+	if !isTargetAnthropic {
+		if raw, ok := reqMap["max_completion_tokens"]; ok {
+			if _, hasMT := reqMap["max_tokens"]; !hasMT {
+				var mt int
+				if json.Unmarshal(raw, &mt) == nil && mt > 0 {
+					reqMap["max_tokens"] = raw
+				}
+			}
+			delete(reqMap, "max_completion_tokens")
+		}
+	}
+	// Anthropic requires max_tokens > 0
+	if isTargetAnthropic {
+		if _, ok := reqMap["max_tokens"]; !ok {
+			reqMap["max_tokens"], _ = json.Marshal(4096)
+		}
+	}
 }
 
 // ---- SSE Helpers ----

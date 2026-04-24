@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -44,7 +45,20 @@ func (d *DB) migrate() error {
 	if _, err := d.Exec(string(data)); err != nil {
 		return fmt.Errorf("exec migration: %w", err)
 	}
+	if _, err := d.Exec("ALTER TABLE request_logs ADD COLUMN diagnostics TEXT"); err != nil && !isDuplicateColumnError(err) {
+		return fmt.Errorf("add diagnostics column: %w", err)
+	}
+	if _, err := d.Exec("ALTER TABLE request_logs ADD COLUMN diagnostics_json TEXT"); err != nil && !isDuplicateColumnError(err) {
+		return fmt.Errorf("add diagnostics_json column: %w", err)
+	}
 	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 func (d *DB) GetConfig(key string) (string, error) {

@@ -16,6 +16,8 @@ export function GetDashboardLogs(arg1:number,arg2:number):Promise<Record<string,
 
 export function GetDashboardStats():Promise<Record<string, any>>;
 
+export function GetDefaultClassifierConfig():Promise<string>;
+
 export function GetModels():Promise<Array<core.ModelJSON>>;
 
 export function GetProxyMode():Promise<string>;

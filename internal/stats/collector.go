@@ -1,6 +1,7 @@
 package stats
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -21,17 +22,19 @@ func NewCollector(database *db.DB) *Collector {
 
 // RequestLog represents a single logged request.
 type RequestLog struct {
-	ID         string
-	ModelID    string
-	Source     string
-	Complexity string
-	RouteMode  string
-	Status     string
-	TokensIn   int
-	TokensOut  int
-	LatencyMs  int64
-	ErrorMsg   string
-	CreatedAt  time.Time
+	ID              string
+	ModelID         string
+	Source          string
+	Complexity      string
+	RouteMode       string
+	Status          string
+	TokensIn        int
+	TokensOut       int
+	LatencyMs       int64
+	ErrorMsg        string
+	Diagnostics     string
+	DiagnosticsJSON string
+	CreatedAt       time.Time
 }
 
 // LogRequest inserts a new request log entry into the database.
@@ -40,10 +43,10 @@ func (c *Collector) LogRequest(log *RequestLog) error {
 		log.ID = uuid.New().String()
 	}
 	_, err := c.db.Exec(
-		`INSERT INTO request_logs (id, model_id, source, complexity, route_mode, status, tokens_in, tokens_out, latency_ms, error_msg, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO request_logs (id, model_id, source, complexity, route_mode, status, tokens_in, tokens_out, latency_ms, error_msg, diagnostics, diagnostics_json, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		log.ID, log.ModelID, log.Source, log.Complexity, log.RouteMode, log.Status,
-		log.TokensIn, log.TokensOut, log.LatencyMs, log.ErrorMsg, log.CreatedAt,
+		log.TokensIn, log.TokensOut, log.LatencyMs, log.ErrorMsg, log.Diagnostics, log.DiagnosticsJSON, log.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert request log: %w", err)
@@ -53,10 +56,10 @@ func (c *Collector) LogRequest(log *RequestLog) error {
 
 // DailyStats holds aggregated statistics for a single day.
 type DailyStats struct {
-	TotalRequests int64
-	TotalTokensIn int64
+	TotalRequests  int64
+	TotalTokensIn  int64
 	TotalTokensOut int64
-	AvgLatencyMs  float64
+	AvgLatencyMs   float64
 }
 
 // GetDailyStats returns aggregated statistics for the given date.
@@ -172,14 +175,16 @@ func (c *Collector) GetComplexityDistribution(date time.Time) (map[string]int64,
 
 // RecentLog is a trimmed view of a request log for display.
 type RecentLog struct {
-	ID         string    `json:"id"`
-	ModelID    string    `json:"modelId"`
-	Source     string    `json:"source"`
-	Complexity string    `json:"complexity"`
-	TokensIn   int       `json:"tokensIn"`
-	TokensOut  int       `json:"tokensOut"`
-	LatencyMs  int64     `json:"latencyMs"`
-	CreatedAt  time.Time `json:"createdAt"`
+	ID              string    `json:"id"`
+	ModelID         string    `json:"modelId"`
+	Source          string    `json:"source"`
+	Complexity      string    `json:"complexity"`
+	TokensIn        int       `json:"tokensIn"`
+	TokensOut       int       `json:"tokensOut"`
+	LatencyMs       int64     `json:"latencyMs"`
+	Diagnostics     string    `json:"diagnostics"`
+	DiagnosticsJSON string    `json:"diagnosticsJson"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 // GetTotalLogCount returns the total number of request log entries.
@@ -201,7 +206,7 @@ func (c *Collector) GetRecentLogsPaginated(page, pageSize int) ([]RecentLog, err
 	offset := (page - 1) * pageSize
 
 	rows, err := c.db.Query(
-		`SELECT id, model_id, source, complexity, tokens_in, tokens_out, latency_ms, created_at
+		`SELECT id, model_id, source, complexity, tokens_in, tokens_out, latency_ms, diagnostics, diagnostics_json, created_at
 			 FROM request_logs
 			 ORDER BY created_at DESC
 			 LIMIT ? OFFSET ?`,
@@ -215,9 +220,17 @@ func (c *Collector) GetRecentLogsPaginated(page, pageSize int) ([]RecentLog, err
 	var logs []RecentLog
 	for rows.Next() {
 		var l RecentLog
+		var diagnostics sql.NullString
+		var diagnosticsJSON sql.NullString
 		if err := rows.Scan(&l.ID, &l.ModelID, &l.Source, &l.Complexity,
-			&l.TokensIn, &l.TokensOut, &l.LatencyMs, &l.CreatedAt); err != nil {
+			&l.TokensIn, &l.TokensOut, &l.LatencyMs, &diagnostics, &diagnosticsJSON, &l.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan recent log: %w", err)
+		}
+		if diagnostics.Valid {
+			l.Diagnostics = diagnostics.String
+		}
+		if diagnosticsJSON.Valid {
+			l.DiagnosticsJSON = diagnosticsJSON.String
 		}
 		logs = append(logs, l)
 	}
@@ -235,7 +248,7 @@ func (c *Collector) GetRecentLogs(limit int) ([]RecentLog, error) {
 	}
 
 	rows, err := c.db.Query(
-		`SELECT id, model_id, source, complexity, tokens_in, tokens_out, latency_ms, created_at
+		`SELECT id, model_id, source, complexity, tokens_in, tokens_out, latency_ms, diagnostics, diagnostics_json, created_at
 		 FROM request_logs
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
@@ -249,9 +262,17 @@ func (c *Collector) GetRecentLogs(limit int) ([]RecentLog, error) {
 	var logs []RecentLog
 	for rows.Next() {
 		var l RecentLog
+		var diagnostics sql.NullString
+		var diagnosticsJSON sql.NullString
 		if err := rows.Scan(&l.ID, &l.ModelID, &l.Source, &l.Complexity,
-			&l.TokensIn, &l.TokensOut, &l.LatencyMs, &l.CreatedAt); err != nil {
+			&l.TokensIn, &l.TokensOut, &l.LatencyMs, &diagnostics, &diagnosticsJSON, &l.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan recent log: %w", err)
+		}
+		if diagnostics.Valid {
+			l.Diagnostics = diagnostics.String
+		}
+		if diagnosticsJSON.Valid {
+			l.DiagnosticsJSON = diagnosticsJSON.String
 		}
 		logs = append(logs, l)
 	}

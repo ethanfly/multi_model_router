@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { Model } from '../stores/models'
 
@@ -35,6 +35,8 @@ function createEmpty(): Model {
 
 const form = ref<Model>(props.model ? { ...props.model } : createEmpty())
 const isEditing = ref(!!props.model)
+const rpmTooLow = computed(() => form.value.maxRpm > 0 && form.value.maxRpm < 5)
+const tpmTooLow = computed(() => form.value.maxTpm > 0 && form.value.maxTpm < 1000)
 
 const providers = ['openai', 'anthropic', 'google', 'ollama', 'other']
 
@@ -110,10 +112,14 @@ function handleOverlayClick(e: MouseEvent) {
           <div class="form-row inline">
             <label>{{ $t('modelEditor.maxRpm') }}</label>
             <input v-model.number="form.maxRpm" type="number" min="0" :placeholder="$t('modelEditor.unlimited')" />
+            <p class="field-hint">{{ $t('modelEditor.maxRpmHint') }}</p>
+            <p v-if="rpmTooLow" class="field-warning">{{ $t('modelEditor.maxRpmWarning') }}</p>
           </div>
           <div class="form-row inline">
             <label>{{ $t('modelEditor.maxTpm') }}</label>
             <input v-model.number="form.maxTpm" type="number" min="0" :placeholder="$t('modelEditor.unlimited')" />
+            <p class="field-hint">{{ $t('modelEditor.maxTpmHint') }}</p>
+            <p v-if="tpmTooLow" class="field-warning">{{ $t('modelEditor.maxTpmWarning') }}</p>
           </div>
         </div>
 
@@ -210,6 +216,21 @@ function handleOverlayClick(e: MouseEvent) {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+}
+
+.field-hint,
+.field-warning {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.field-hint {
+  color: var(--text-muted);
+}
+
+.field-warning {
+  color: var(--warning);
 }
 
 /* Unified form controls */

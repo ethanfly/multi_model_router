@@ -1,4 +1,6 @@
 <script lang="ts" setup>
+import RouteDiagnosticsCard from './RouteDiagnosticsCard.vue'
+
 defineProps<{
   message: {
     role: 'user' | 'assistant' | 'error'
@@ -6,6 +8,8 @@ defineProps<{
     modelName?: string
     complexity?: string
     routeMode?: string
+    diagnostics?: string
+    diagnosticsJson?: string
     isError?: boolean
   }
 }>()
@@ -19,6 +23,12 @@ defineProps<{
       <span v-if="message.routeMode" class="badge route-badge">{{ message.routeMode }}</span>
     </div>
     <div class="bubble-content">{{ message.content }}</div>
+    <RouteDiagnosticsCard
+      v-if="message.role === 'assistant' && (message.diagnostics || message.diagnosticsJson)"
+      :summary="message.diagnostics"
+      :diagnostics-json="message.diagnosticsJson"
+      title="Routing Decision"
+    />
   </div>
 </template>
 

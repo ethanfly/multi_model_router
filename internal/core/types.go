@@ -33,13 +33,15 @@ type ChatRequest struct {
 
 // ChatResponse is sent back after routing a chat.
 type ChatResponse struct {
-	ModelID    string `json:"modelId"`
-	ModelName  string `json:"modelName"`
-	Provider   string `json:"provider"`
-	Complexity string `json:"complexity"`
-	RouteMode  string `json:"routeMode"`
-	Status     string `json:"status"`
-	Error      string `json:"error"`
+	ModelID         string `json:"modelId"`
+	ModelName       string `json:"modelName"`
+	Provider        string `json:"provider"`
+	Complexity      string `json:"complexity"`
+	RouteMode       string `json:"routeMode"`
+	Status          string `json:"status"`
+	Error           string `json:"error"`
+	Diagnostics     string `json:"diagnostics"`
+	DiagnosticsJSON string `json:"diagnosticsJson"`
 }
 
 // ProxyStatus represents the current state of the proxy server.

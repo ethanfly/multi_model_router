@@ -13,8 +13,8 @@ import (
 	"multi_model_router/internal/autostart"
 	"multi_model_router/internal/config"
 	"multi_model_router/internal/core"
-	"multi_model_router/internal/router"
 	"multi_model_router/internal/provider"
+	"multi_model_router/internal/router"
 	"multi_model_router/internal/stats"
 	"multi_model_router/internal/wintray"
 
@@ -201,11 +201,14 @@ func (a *App) SendChat(req core.ChatRequest) core.ChatResponse {
 	}
 
 	resp := core.ChatResponse{
-		ModelName: result.ModelName,
-		Provider:  result.Provider,
-		Status:    result.Status,
-		Error:     result.ErrorMsg,
-		RouteMode: router.RouteMode(result.RouteMode).String(),
+		ModelName:       result.ModelName,
+		Provider:        result.Provider,
+		Complexity:      router.Complexity(result.Complexity).String(),
+		Status:          result.Status,
+		Error:           result.ErrorMsg,
+		RouteMode:       router.RouteMode(result.RouteMode).String(),
+		Diagnostics:     diagnosticsSummary(result.Diagnostics),
+		DiagnosticsJSON: diagnosticsJSON(result.Diagnostics),
 	}
 
 	if result.Status != "success" {
@@ -238,8 +241,10 @@ func (a *App) SendChat(req core.ChatRequest) core.ChatResponse {
 		}
 
 		wailsRuntime.EventsEmit(a.ctx, "chat:done", map[string]string{
-			"content": fullContent,
-			"model":   result.ModelName,
+			"content":         fullContent,
+			"model":           result.ModelName,
+			"diagnostics":     diagnosticsSummary(result.Diagnostics),
+			"diagnosticsJson": diagnosticsJSON(result.Diagnostics),
 		})
 
 		// Log to stats
@@ -250,20 +255,36 @@ func (a *App) SendChat(req core.ChatRequest) core.ChatResponse {
 			tokensOut = usage.OutputTokens
 		}
 		_ = a.core.LogRequest(&stats.RequestLog{
-			ID:         router.NewUUID(),
-			ModelID:    result.ModelName,
-			Source:     "gui",
-			Complexity: router.Complexity(result.Complexity).String(),
-			RouteMode:  resp.RouteMode,
-			Status:     "success",
-			TokensIn:   tokensIn,
-			TokensOut:  tokensOut,
-			LatencyMs:  result.LatencyMs,
-			CreatedAt:  time.Now(),
+			ID:              router.NewUUID(),
+			ModelID:         result.ModelName,
+			Source:          "gui",
+			Complexity:      router.Complexity(result.Complexity).String(),
+			RouteMode:       resp.RouteMode,
+			Status:          "success",
+			TokensIn:        tokensIn,
+			TokensOut:       tokensOut,
+			LatencyMs:       result.LatencyMs,
+			Diagnostics:     diagnosticsSummary(result.Diagnostics),
+			DiagnosticsJSON: diagnosticsJSON(result.Diagnostics),
+			CreatedAt:       time.Now(),
 		})
 	}()
 
 	return resp
+}
+
+func diagnosticsSummary(d *router.RouteDiagnostics) string {
+	if d == nil {
+		return ""
+	}
+	return d.Summary
+}
+
+func diagnosticsJSON(d *router.RouteDiagnostics) string {
+	if d == nil {
+		return ""
+	}
+	return d.ToJSON()
 }
 
 func (a *App) GetDashboardStats() map[string]any {
@@ -310,6 +331,10 @@ func (a *App) SetProxyMode(mode string) string {
 func (a *App) GetClassifierConfig() string {
 	cfg := a.core.GetClassifierConfig()
 	return cfg.ToJSON()
+}
+
+func (a *App) GetDefaultClassifierConfig() string {
+	return router.DefaultClassifierConfig().ToJSON()
 }
 
 func (a *App) SetClassifierConfig(jsonStr string) string {

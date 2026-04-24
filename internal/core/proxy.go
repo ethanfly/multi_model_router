@@ -126,16 +126,18 @@ func (c *Core) wireProxyLogger() {
 			return
 		}
 		_ = c.collector.LogRequest(&stats.RequestLog{
-			ModelID:    entry.ModelName,
-			Source:     entry.Source,
-			Complexity: router.Complexity(entry.Complexity).String(),
-			RouteMode:  entry.RouteMode,
-			Status:     entry.Status,
-			TokensIn:   entry.TokensIn,
-			TokensOut:  entry.TokensOut,
-			LatencyMs:  entry.LatencyMs,
-			ErrorMsg:   entry.ErrorMsg,
-			CreatedAt:  time.Now(),
+			ModelID:         entry.ModelName,
+			Source:          entry.Source,
+			Complexity:      router.Complexity(entry.Complexity).String(),
+			RouteMode:       entry.RouteMode,
+			Status:          entry.Status,
+			TokensIn:        entry.TokensIn,
+			TokensOut:       entry.TokensOut,
+			LatencyMs:       entry.LatencyMs,
+			ErrorMsg:        entry.ErrorMsg,
+			Diagnostics:     entry.Diagnostics,
+			DiagnosticsJSON: entry.DiagnosticsJSON,
+			CreatedAt:       time.Now(),
 		})
 	}
 }
