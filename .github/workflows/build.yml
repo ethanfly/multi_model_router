@@ -14,8 +14,24 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runner: windows
+            artifact: windows-amd64
+            ext: .exe
+          - os: ubuntu-latest
+            runner: linux
+            artifact: linux-amd64
+            ext: ''
+          - os: macos-latest
+            runner: darwin
+            artifact: darwin-universal
+            ext: ''
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,8 +45,9 @@ jobs:
         with:
           node-version: '20'
 
-      # Icons are committed to repo; regenerate only if SVG changed
-      - name: Generate icons (optional)
+      # Icons are committed; only regenerate on Windows (generates both ICO and PNG)
+      - name: Generate icons
+        if: matrix.runner == 'windows'
         continue-on-error: true
         run: |
           npm install --no-save sharp png-to-ico
@@ -39,7 +56,6 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-      # Determine version from tag, branch, or input
       - name: Set version
         id: version
         shell: bash
@@ -55,21 +71,23 @@ jobs:
           echo "Building version: $VERSION"
 
       - name: Build
-        run: wails build -clean -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
-
-      - name: Rename binary with version
+        id: build
         shell: bash
         run: |
-          mv build/bin/MultiModelRouter.exe "build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64.exe"
+          wails build -clean -ldflags "-s -w -X main.version=${{ steps.version.outputs.version }}"
+          BINARY="build/bin/MultiModelRouter${{ matrix.ext }}"
+          RENAMED="build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-${{ matrix.artifact }}${{ matrix.ext }}"
+          mv "$BINARY" "$RENAMED"
+          echo "artifact_path=$RENAMED" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
-          path: build/bin/MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64.exe
+          name: MultiModelRouter-${{ steps.version.outputs.version }}-${{ matrix.artifact }}${{ matrix.ext }}
+          path: ${{ steps.build.outputs.artifact_path }}
 
   release:
-    needs: build-windows
+    needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -77,15 +95,19 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
-      - name: Download artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64
+          pattern: MultiModelRouter-${{ steps.version.outputs.version }}-*
+          merge-multiple: false
+
+      - name: List downloaded files
+        run: ls -la
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: MultiModelRouter-${{ steps.version.outputs.version }}-windows-amd64.exe
+          files: MultiModelRouter-${{ steps.version.outputs.version }}-*/*
           generate_release_notes: true
           draft: false
           prerelease: false
