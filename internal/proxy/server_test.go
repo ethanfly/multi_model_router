@@ -1361,6 +1361,107 @@ func TestHandleChatCompletion_ConvertsOpenAIStreamResponseForAnthropicClient(t *
 	}
 }
 
+func TestHandleChatCompletion_ConvertsOpenAIStreamToolCallsForAnthropicClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("expected OpenAI upstream path, got %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"city\\\"\"}}]},\"finish_reason\":null}],\"model\":\"gpt-4.1-mini\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\":\\\"Paris\\\"}\"}}]},\"finish_reason\":null}],\"model\":\"gpt-4.1-mini\"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"model\":\"gpt-4.1-mini\",\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Fast",
+		Provider: "openai",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "gpt-4.1-mini",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"auto","stream":true,"max_tokens":64,"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		"event: content_block_start",
+		`"type":"tool_use"`,
+		`"id":"call_1"`,
+		`"name":"lookup"`,
+		`"type":"input_json_delta"`,
+		`"stop_reason":"tool_use"`,
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected converted Anthropic tool stream to contain %s, got %s", want, body)
+		}
+	}
+}
+
+func TestHandleChatCompletion_ConvertsAnthropicStreamToolUseForOpenAIClient(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":7}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\",\"input\":{}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\"\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"Paris\\\"}\"}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer upstream.Close()
+
+	model := &router.ModelConfig{
+		ID:       "m1",
+		Name:     "Claude",
+		Provider: "anthropic",
+		BaseURL:  upstream.URL,
+		APIKey:   "secret",
+		ModelID:  "claude-test",
+	}
+	s := &Server{router: selectionExplainerRouter{model: model}, httpClient: upstream.Client()}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"auto","stream":true,"max_tokens":64,"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	s.handleChatCompletion(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`"tool_calls"`,
+		`"id":"call_1"`,
+		`"name":"lookup"`,
+		`"arguments":"{\"city\""`,
+		`"arguments":":\"Paris\"}"`,
+		`"finish_reason":"tool_calls"`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected converted OpenAI tool stream to contain %s, got %s", want, body)
+		}
+	}
+}
+
 func TestSanitizeNullContent_ReplacesNull(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"messages": json.RawMessage(`[

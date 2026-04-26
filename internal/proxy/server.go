@@ -888,6 +888,8 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 		var inputTokens int
 		var contentReceived bool
 		var blockType string
+		var blockIndex int
+		var stopReason string
 		var thinking strings.Builder
 		var signature string
 		var preserveContentBlocks bool
@@ -915,10 +917,12 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 					} `json:"message"`
 					ContentBlock map[string]interface{} `json:"content_block"`
 					Delta        *struct {
-						Type      string `json:"type"`
-						Text      string `json:"text"`
-						Thinking  string `json:"thinking"`
-						Signature string `json:"signature"`
+						Type        string `json:"type"`
+						Text        string `json:"text"`
+						Thinking    string `json:"thinking"`
+						Signature   string `json:"signature"`
+						PartialJSON string `json:"partial_json"`
+						StopReason  string `json:"stop_reason"`
 					} `json:"delta"`
 					Usage *struct {
 						OutputTokens int `json:"output_tokens"`
@@ -939,6 +943,7 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 					}
 				case "content_block_start":
 					blockType = ""
+					blockIndex = event.Index
 					thinking.Reset()
 					signature = ""
 					if event.ContentBlock != nil {
@@ -953,6 +958,22 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 						}
 						if blockType == "thinking" {
 							preserveContentBlocks = true
+						}
+						if blockType == "tool_use" {
+							tool := &provider.ToolCallDelta{Index: event.Index}
+							if id, ok := event.ContentBlock["id"].(string); ok {
+								tool.ID = id
+							}
+							if name, ok := event.ContentBlock["name"].(string); ok {
+								tool.Name = name
+							}
+							if input, ok := event.ContentBlock["input"]; ok && input != nil {
+								if b, err := json.Marshal(input); err == nil && string(b) != "{}" && string(b) != "null" {
+									tool.Arguments = string(b)
+								}
+							}
+							out <- provider.StreamChunk{ToolCall: tool, Model: model}
+							contentReceived = true
 						}
 					}
 				case "content_block_delta":
@@ -970,6 +991,13 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 					if event.Delta != nil && event.Delta.Signature != "" {
 						signature = event.Delta.Signature
 					}
+					if blockType == "tool_use" && event.Delta != nil && event.Delta.PartialJSON != "" {
+						out <- provider.StreamChunk{
+							ToolCall: &provider.ToolCallDelta{Index: blockIndex, Arguments: event.Delta.PartialJSON},
+							Model:    model,
+						}
+						contentReceived = true
+					}
 				case "content_block_stop":
 					if blockType == "thinking" && thinking.Len() > 0 {
 						block := map[string]interface{}{
@@ -986,13 +1014,16 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 					thinking.Reset()
 					signature = ""
 				case "message_delta":
+					if event.Delta != nil && event.Delta.StopReason != "" {
+						stopReason = event.Delta.StopReason
+					}
 					usage := &provider.Usage{InputTokens: inputTokens}
 					if event.Usage != nil {
 						usage.OutputTokens = event.Usage.OutputTokens
 					}
-					out <- provider.StreamChunk{Usage: usage, Model: model}
+					out <- provider.StreamChunk{Usage: usage, StopReason: stopReason, Model: model}
 				case "message_stop":
-					out <- provider.StreamChunk{Done: true, Model: model}
+					out <- provider.StreamChunk{Done: true, StopReason: stopReason, Model: model}
 					return
 				}
 				continue
@@ -1001,7 +1032,20 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 			var resp struct {
 				Choices []struct {
 					Delta struct {
-						Content string `json:"content"`
+						Content   string `json:"content"`
+						ToolCalls []struct {
+							Index    int    `json:"index"`
+							ID       string `json:"id"`
+							Type     string `json:"type"`
+							Function *struct {
+								Name      string `json:"name"`
+								Arguments string `json:"arguments"`
+							} `json:"function"`
+						} `json:"tool_calls"`
+						FunctionCall *struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function_call"`
 					} `json:"delta"`
 					FinishReason *string `json:"finish_reason"`
 				} `json:"choices"`
@@ -1025,8 +1069,31 @@ func parseUpstreamStream(first io.Reader, firstErr error, body io.ReadCloser, is
 					out <- provider.StreamChunk{Content: choice.Delta.Content, Model: model}
 					contentReceived = true
 				}
+				for _, call := range choice.Delta.ToolCalls {
+					tool := &provider.ToolCallDelta{
+						Index: call.Index,
+						ID:    call.ID,
+					}
+					if call.Function != nil {
+						tool.Name = call.Function.Name
+						tool.Arguments = call.Function.Arguments
+					}
+					out <- provider.StreamChunk{ToolCall: tool, Model: model}
+					contentReceived = true
+				}
+				if choice.Delta.FunctionCall != nil {
+					out <- provider.StreamChunk{
+						ToolCall: &provider.ToolCallDelta{
+							Index:     0,
+							Name:      choice.Delta.FunctionCall.Name,
+							Arguments: choice.Delta.FunctionCall.Arguments,
+						},
+						Model: model,
+					}
+					contentReceived = true
+				}
 				if choice.FinishReason != nil {
-					out <- provider.StreamChunk{Done: true, Model: model}
+					out <- provider.StreamChunk{Done: true, StopReason: *choice.FinishReason, Model: model}
 					return
 				}
 			}
@@ -1296,6 +1363,36 @@ func openAIFinishReasonToAnthropic(reason string) string {
 	}
 }
 
+func streamStopReasonForOpenAI(reason string, sawToolCall bool) string {
+	switch reason {
+	case "tool_use", "tool_calls", "function_call":
+		return "tool_calls"
+	case "max_tokens", "length":
+		return "length"
+	case "stop", "end_turn":
+		return "stop"
+	}
+	if sawToolCall {
+		return "tool_calls"
+	}
+	return "stop"
+}
+
+func streamStopReasonForAnthropic(reason string, sawToolCall bool) string {
+	switch reason {
+	case "tool_use", "tool_calls", "function_call":
+		return "tool_use"
+	case "max_tokens", "length":
+		return "max_tokens"
+	case "stop", "end_turn":
+		return "end_turn"
+	}
+	if sawToolCall {
+		return "tool_use"
+	}
+	return "end_turn"
+}
+
 func parseOpenAINonStreaming(body []byte) (string, *provider.Usage, error) {
 	var resp struct {
 		Choices []struct {
@@ -1493,6 +1590,8 @@ func (s *Server) writeOpenAIStream(w http.ResponseWriter, result *router.RouteRe
 	})
 
 	var hasSentContent bool
+	var sawToolCall bool
+	var lastUsage *provider.Usage
 	for chunk := range result.Stream {
 		if chunk.Error != nil {
 			log.Printf("stream error: %v", chunk.Error)
@@ -1508,24 +1607,34 @@ func (s *Server) writeOpenAIStream(w http.ResponseWriter, result *router.RouteRe
 			return
 		}
 
+		if chunk.Usage != nil {
+			lastUsage = chunk.Usage
+			rs.tokensIn = chunk.Usage.InputTokens
+			rs.tokensOut = chunk.Usage.OutputTokens
+		}
+
 		if chunk.Done {
+			usage := chunk.Usage
+			if usage == nil {
+				usage = lastUsage
+			}
 			doneData := map[string]interface{}{
 				"id":      completionID,
 				"object":  "chat.completion.chunk",
 				"created": created,
 				"model":   chunk.Model,
 				"choices": []map[string]interface{}{
-					{"index": 0, "delta": map[string]interface{}{}, "finish_reason": "stop"},
+					{"index": 0, "delta": map[string]interface{}{}, "finish_reason": streamStopReasonForOpenAI(chunk.StopReason, sawToolCall)},
 				},
 			}
-			if chunk.Usage != nil {
+			if usage != nil {
 				doneData["usage"] = map[string]interface{}{
-					"prompt_tokens":     chunk.Usage.InputTokens,
-					"completion_tokens": chunk.Usage.OutputTokens,
-					"total_tokens":      chunk.Usage.InputTokens + chunk.Usage.OutputTokens,
+					"prompt_tokens":     usage.InputTokens,
+					"completion_tokens": usage.OutputTokens,
+					"total_tokens":      usage.InputTokens + usage.OutputTokens,
 				}
-				rs.tokensIn = chunk.Usage.InputTokens
-				rs.tokensOut = chunk.Usage.OutputTokens
+				rs.tokensIn = usage.InputTokens
+				rs.tokensOut = usage.OutputTokens
 			}
 			writeSSE(w, flusher, canFlush, doneData)
 			hasSentContent = true
@@ -1558,6 +1667,34 @@ func (s *Server) writeOpenAIStream(w http.ResponseWriter, result *router.RouteRe
 				})
 				hasSentContent = true
 			}
+		}
+		if chunk.ToolCall != nil {
+			toolDelta := map[string]interface{}{"index": chunk.ToolCall.Index}
+			if chunk.ToolCall.ID != "" {
+				toolDelta["id"] = chunk.ToolCall.ID
+			}
+			fn := map[string]interface{}{}
+			if chunk.ToolCall.Name != "" {
+				toolDelta["type"] = "function"
+				fn["name"] = chunk.ToolCall.Name
+			}
+			if chunk.ToolCall.Arguments != "" {
+				fn["arguments"] = chunk.ToolCall.Arguments
+			}
+			if len(fn) > 0 {
+				toolDelta["function"] = fn
+			}
+			writeSSE(w, flusher, canFlush, map[string]interface{}{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   chunk.Model,
+				"choices": []map[string]interface{}{
+					{"index": 0, "delta": map[string]interface{}{"tool_calls": []map[string]interface{}{toolDelta}}, "finish_reason": nil},
+				},
+			})
+			hasSentContent = true
+			sawToolCall = true
 		}
 	}
 
@@ -1636,7 +1773,6 @@ func (s *Server) writeAnthropicStream(w http.ResponseWriter, result *router.Rout
 	flusher, canFlush := w.(http.Flusher)
 	msgID := fmt.Sprintf("msg_%d", time.Now().UnixNano())
 
-	// message_start
 	writeAnthropicSSE(w, flusher, canFlush, "message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
@@ -1651,17 +1787,113 @@ func (s *Server) writeAnthropicStream(w http.ResponseWriter, result *router.Rout
 		},
 	})
 
-	// content_block_start
-	writeAnthropicSSE(w, flusher, canFlush, "content_block_start", map[string]interface{}{
-		"type":  "content_block_start",
-		"index": 0,
-		"content_block": map[string]string{
-			"type": "text",
-			"text": "",
-		},
-	})
+	type toolState struct {
+		blockIndex int
+		id         string
+		name       string
+		started    bool
+		closed     bool
+		pending    strings.Builder
+	}
 
+	var textBlockOpen bool
+	var textBlockIndex int
+	var nextBlockIndex int
+	var emittedContentBlock bool
 	var outputTokens int
+	var stopReason string
+	var sawToolCall bool
+	toolStates := map[int]*toolState{}
+	var toolOrder []int
+
+	closeTextBlock := func() {
+		if !textBlockOpen {
+			return
+		}
+		writeAnthropicSSE(w, flusher, canFlush, "content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": textBlockIndex,
+		})
+		textBlockOpen = false
+	}
+
+	startTextBlock := func() {
+		if textBlockOpen {
+			return
+		}
+		textBlockIndex = nextBlockIndex
+		nextBlockIndex++
+		emittedContentBlock = true
+		textBlockOpen = true
+		writeAnthropicSSE(w, flusher, canFlush, "content_block_start", map[string]interface{}{
+			"type":  "content_block_start",
+			"index": textBlockIndex,
+			"content_block": map[string]string{
+				"type": "text",
+				"text": "",
+			},
+		})
+	}
+
+	writeTextDelta := func(text string) {
+		if text == "" {
+			return
+		}
+		startTextBlock()
+		writeAnthropicSSE(w, flusher, canFlush, "content_block_delta", map[string]interface{}{
+			"type":  "content_block_delta",
+			"index": textBlockIndex,
+			"delta": map[string]string{"type": "text_delta", "text": text},
+		})
+	}
+
+	startToolBlock := func(state *toolState) {
+		if state.started || state.name == "" {
+			return
+		}
+		closeTextBlock()
+		if state.id == "" {
+			state.id = fmt.Sprintf("call_%d", state.blockIndex)
+		}
+		state.started = true
+		emittedContentBlock = true
+		writeAnthropicSSE(w, flusher, canFlush, "content_block_start", map[string]interface{}{
+			"type":  "content_block_start",
+			"index": state.blockIndex,
+			"content_block": map[string]interface{}{
+				"type":  "tool_use",
+				"id":    state.id,
+				"name":  state.name,
+				"input": map[string]interface{}{},
+			},
+		})
+		if state.pending.Len() > 0 {
+			writeAnthropicSSE(w, flusher, canFlush, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": state.blockIndex,
+				"delta": map[string]string{"type": "input_json_delta", "partial_json": state.pending.String()},
+			})
+			state.pending.Reset()
+		}
+	}
+
+	toolStateFor := func(delta *provider.ToolCallDelta) *toolState {
+		state, ok := toolStates[delta.Index]
+		if !ok {
+			state = &toolState{blockIndex: nextBlockIndex}
+			nextBlockIndex++
+			toolStates[delta.Index] = state
+			toolOrder = append(toolOrder, delta.Index)
+		}
+		if delta.ID != "" {
+			state.id = delta.ID
+		}
+		if delta.Name != "" {
+			state.name = delta.Name
+		}
+		startToolBlock(state)
+		return state
+	}
 
 	for chunk := range result.Stream {
 		if chunk.Error != nil {
@@ -1680,38 +1912,67 @@ func (s *Server) writeAnthropicStream(w http.ResponseWriter, result *router.Rout
 			rs.tokensIn = chunk.Usage.InputTokens
 			rs.tokensOut = chunk.Usage.OutputTokens
 		}
+		if chunk.StopReason != "" {
+			stopReason = chunk.StopReason
+		}
 
 		if chunk.Content != "" {
-			writeAnthropicSSE(w, flusher, canFlush, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": 0,
-				"delta": map[string]string{"type": "text_delta", "text": chunk.Content},
-			})
+			writeTextDelta(chunk.Content)
+		}
+		if chunk.ContentBlock != nil {
+			writeTextDelta(textFromContentBlock(chunk.ContentBlock))
+		}
+		if chunk.ToolCall != nil {
+			sawToolCall = true
+			state := toolStateFor(chunk.ToolCall)
+			if chunk.ToolCall.Arguments != "" {
+				if state.started {
+					writeAnthropicSSE(w, flusher, canFlush, "content_block_delta", map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": state.blockIndex,
+						"delta": map[string]string{"type": "input_json_delta", "partial_json": chunk.ToolCall.Arguments},
+					})
+				} else {
+					state.pending.WriteString(chunk.ToolCall.Arguments)
+				}
+			}
 		}
 
 		if chunk.Done {
+			if chunk.StopReason != "" {
+				stopReason = chunk.StopReason
+			}
 			break
 		}
 	}
 
-	// content_block_stop
 	rs.status = "success"
-	writeAnthropicSSE(w, flusher, canFlush, "content_block_stop", map[string]interface{}{
-		"type":  "content_block_stop",
-		"index": 0,
-	})
+	closeTextBlock()
+	if !emittedContentBlock {
+		startTextBlock()
+		closeTextBlock()
+	}
+	for _, toolIndex := range toolOrder {
+		state := toolStates[toolIndex]
+		if state == nil || !state.started || state.closed {
+			continue
+		}
+		writeAnthropicSSE(w, flusher, canFlush, "content_block_stop", map[string]interface{}{
+			"type":  "content_block_stop",
+			"index": state.blockIndex,
+		})
+		state.closed = true
+	}
 
-	// message_delta
 	writeAnthropicSSE(w, flusher, canFlush, "message_delta", map[string]interface{}{
 		"type": "message_delta",
 		"delta": map[string]interface{}{
-			"stop_reason":   "end_turn",
+			"stop_reason":   streamStopReasonForAnthropic(stopReason, sawToolCall),
 			"stop_sequence": nil,
 		},
 		"usage": map[string]int{"output_tokens": outputTokens},
 	})
 
-	// message_stop
 	writeAnthropicSSE(w, flusher, canFlush, "message_stop", map[string]interface{}{
 		"type": "message_stop",
 	})

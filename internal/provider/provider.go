@@ -40,9 +40,18 @@ type ChatRequest struct {
 	Stream      bool      `json:"stream"`
 }
 
+type ToolCallDelta struct {
+	Index     int
+	ID        string
+	Name      string
+	Arguments string
+}
+
 type StreamChunk struct {
 	Content      string
 	ContentBlock map[string]interface{}
+	ToolCall     *ToolCallDelta
+	StopReason   string
 	Done         bool
 	Model        string
 	Usage        *Usage
