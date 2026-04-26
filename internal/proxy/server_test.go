@@ -14,6 +14,27 @@ import (
 	"multi_model_router/internal/router"
 )
 
+func TestServerStart_AcceptsOpenAIPathWithoutV1(t *testing.T) {
+	selected := &router.ModelConfig{ID: "selected", Name: "Selected", Provider: "openai", BaseURL: "http://127.0.0.1", APIKey: "secret", ModelID: "gpt-selected"}
+	s := NewWithManualModel(0, selectionExplainerRouter{model: selected}, router.RouteManual, "selected", "")
+	if s.server != nil {
+		t.Fatal("expected server not started")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/completions", bytes.NewBufferString(`{"model":"auto","messages":[{"role":"user","content":"hello"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletion)
+	mux.HandleFunc("/chat/completions", s.handleChatCompletion)
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusOK && strings.Contains(rr.Body.String(), `"service":"multi-model-router"`) {
+		t.Fatalf("expected /chat/completions not to route to health handler, got %s", rr.Body.String())
+	}
+}
+
 func TestConvertMessagesForUpstream_OpenAIToolMessageToAnthropicUserToolResult(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"messages": json.RawMessage(`[
@@ -907,7 +928,7 @@ func TestHandleChatCompletion_SetsDecisionHeaderFromDiagnostics(t *testing.T) {
 	}
 }
 
-func TestHandleChatCompletion_OpenAIClientToAnthropicPreservesThinking(t *testing.T) {
+func TestHandleChatCompletion_OpenAIClientToAnthropicReturnsStringContent(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/messages" {
 			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
@@ -981,27 +1002,21 @@ func TestHandleChatCompletion_OpenAIClientToAnthropicPreservesThinking(t *testin
 	var got struct {
 		Choices []struct {
 			Message struct {
-				Content json.RawMessage `json:"content"`
+				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
-		t.Fatalf("expected OpenAI-compatible JSON, got %v body=%s", err, rr.Body.String())
+		t.Fatalf("expected OpenAI-compatible JSON with string content, got %v body=%s", err, rr.Body.String())
 	}
 	if len(got.Choices) != 1 {
 		t.Fatalf("unexpected converted response: %+v", got)
 	}
-	var contentBlocks []struct {
-		Type      string `json:"type"`
-		Thinking  string `json:"thinking"`
-		Signature string `json:"signature"`
-		Text      string `json:"text"`
+	if got.Choices[0].Message.Content != "ok" {
+		t.Fatalf("expected OpenAI response content to contain text only, got %q", got.Choices[0].Message.Content)
 	}
-	if err := json.Unmarshal(got.Choices[0].Message.Content, &contentBlocks); err != nil {
-		t.Fatalf("expected OpenAI response content blocks, got %v content=%s", err, string(got.Choices[0].Message.Content))
-	}
-	if len(contentBlocks) != 2 || contentBlocks[0].Type != "thinking" || contentBlocks[0].Thinking != "new hidden chain" || contentBlocks[0].Signature != "new_sig" || contentBlocks[1].Text != "ok" {
-		t.Fatalf("expected thinking and text blocks in OpenAI response, got %+v", contentBlocks)
+	if strings.Contains(got.Choices[0].Message.Content, "thinking") || strings.Contains(got.Choices[0].Message.Content, "new hidden chain") {
+		t.Fatalf("expected thinking omitted from OpenAI response content, got %q", got.Choices[0].Message.Content)
 	}
 }
 
@@ -1067,7 +1082,7 @@ func TestConvertNonStreamingResponse_OpenAIToolCallsToAnthropicToolUse(t *testin
 	}
 }
 
-func TestHandleChatCompletion_OpenAIClientToAnthropicStreamPreservesThinking(t *testing.T) {
+func TestHandleChatCompletion_OpenAIClientToAnthropicStreamReturnsStringDeltas(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/messages" {
 			t.Fatalf("expected Anthropic upstream path, got %q", r.URL.Path)
@@ -1106,11 +1121,11 @@ func TestHandleChatCompletion_OpenAIClientToAnthropicStreamPreservesThinking(t *
 		t.Fatalf("expected status 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, `"type":"thinking"`) || !strings.Contains(body, `"thinking":"hidden"`) || !strings.Contains(body, `"signature":"sig"`) {
-		t.Fatalf("expected OpenAI stream to include thinking content block, got %s", body)
+	if strings.Contains(body, `"type":"thinking"`) || strings.Contains(body, `"thinking":"hidden"`) || strings.Contains(body, `"signature":"sig"`) {
+		t.Fatalf("expected OpenAI stream to omit thinking content blocks, got %s", body)
 	}
-	if !strings.Contains(body, `"type":"text"`) || !strings.Contains(body, `"text":"ok"`) {
-		t.Fatalf("expected OpenAI stream to include text content block after thinking, got %s", body)
+	if !strings.Contains(body, `"delta":{"content":"ok"}`) {
+		t.Fatalf("expected OpenAI stream to include string text delta, got %s", body)
 	}
 }
 
@@ -1400,5 +1415,46 @@ func TestSanitizeNullContent_NoMessages(t *testing.T) {
 
 	if _, ok := reqMap["messages"]; ok {
 		t.Error("expected no messages key to remain absent")
+	}
+}
+
+func TestParseAnthropicNonStreamingForOpenAI_ContentIsStringWithoutThinkingBlocks(t *testing.T) {
+	body := []byte(`{
+		"content": [
+			{"type":"thinking","thinking":"internal reasoning","signature":"sig"},
+			{"type":"text","text":"HEARTBEAT_OK"}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 2, "output_tokens": 3}
+	}`)
+
+	message, usage, finishReason, err := parseAnthropicNonStreamingForOpenAI(body)
+	if err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	content, ok := message["content"].(string)
+	if !ok {
+		t.Fatalf("expected OpenAI message content to be string, got %T: %#v", message["content"], message["content"])
+	}
+	if content != "HEARTBEAT_OK" {
+		t.Fatalf("expected text content only, got %q", content)
+	}
+	if strings.Contains(content, "thinking") || strings.Contains(content, "internal reasoning") {
+		t.Fatalf("expected thinking block omitted from OpenAI content, got %q", content)
+	}
+	if finishReason != "stop" {
+		t.Fatalf("expected finish reason stop, got %q", finishReason)
+	}
+	if usage == nil || usage.InputTokens != 2 || usage.OutputTokens != 3 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+}
+
+func TestTextFromContentBlock_OnlyExtractsTextBlocks(t *testing.T) {
+	if got := textFromContentBlock(map[string]interface{}{"type": "text", "text": "hello"}); got != "hello" {
+		t.Fatalf("expected text block extracted, got %q", got)
+	}
+	if got := textFromContentBlock(map[string]interface{}{"type": "thinking", "thinking": "secret"}); got != "" {
+		t.Fatalf("expected thinking block omitted, got %q", got)
 	}
 }

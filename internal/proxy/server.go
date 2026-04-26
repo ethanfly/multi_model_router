@@ -100,11 +100,15 @@ func (s *Server) Start() error {
 
 	// Chat endpoints (full protocol support)
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletion)
+	mux.HandleFunc("/chat/completions", s.handleChatCompletion)
 	mux.HandleFunc("/v1/messages", s.handleChatCompletion)
+	mux.HandleFunc("/messages", s.handleChatCompletion)
 
 	// Model listing endpoints
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModels)
+	mux.HandleFunc("/models", s.handleModels)
+	mux.HandleFunc("/models/", s.handleModels)
 
 	// Generic passthrough for all other /v1/* endpoints
 	// Covers: embeddings, completions, images, audio, moderations, etc.
@@ -1106,20 +1110,17 @@ func parseAnthropicNonStreamingForOpenAI(body []byte) (map[string]interface{}, *
 	}
 
 	var textParts []string
-	var contentBlocks []map[string]interface{}
 	var toolCalls []map[string]interface{}
-	preserveBlocks := false
 	for _, block := range resp.Content {
 		blockType, _ := block["type"].(string)
 		switch blockType {
 		case "text":
 			if text, _ := block["text"].(string); text != "" {
 				textParts = append(textParts, text)
-				contentBlocks = append(contentBlocks, block)
 			}
 		case "thinking", "redacted_thinking":
-			contentBlocks = append(contentBlocks, block)
-			preserveBlocks = true
+			// OpenAI-compatible message.content must remain a string; thinking
+			// blocks are intentionally omitted from this compatibility response.
 		case "tool_use":
 			if call, ok := anthropicToolUseBlockToOpenAIInterface(block); ok {
 				toolCalls = append(toolCalls, call)
@@ -1128,11 +1129,11 @@ func parseAnthropicNonStreamingForOpenAI(body []byte) (map[string]interface{}, *
 	}
 
 	message := map[string]interface{}{"role": "assistant"}
-	if preserveBlocks {
-		message["content"] = contentBlocks
-	} else {
-		message["content"] = strings.Join(textParts, "")
-	}
+	// OpenAI Chat Completions requires message.content to be a string.
+	// Do not preserve Anthropic thinking/redacted_thinking blocks in the
+	// OpenAI-compatible content field; clients may stringify object parts as
+	// "[object Object]". Text blocks are the only portable content here.
+	message["content"] = strings.Join(textParts, "")
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 		if message["content"] == nil {
@@ -1378,6 +1379,20 @@ func textFromContent(content interface{}) string {
 	}
 }
 
+func textFromContentBlock(block map[string]interface{}) string {
+	if block == nil {
+		return ""
+	}
+	blockType, _ := block["type"].(string)
+	switch blockType {
+	case "text":
+		if text, ok := block["text"].(string); ok {
+			return text
+		}
+	}
+	return ""
+}
+
 func protocolErrorBody(isAnthropic bool, message string) map[string]interface{} {
 	if isAnthropic {
 		return map[string]interface{}{"type": "error", "error": map[string]string{"type": "api_error", "message": message}}
@@ -1531,16 +1546,18 @@ func (s *Server) writeOpenAIStream(w http.ResponseWriter, result *router.RouteRe
 			hasSentContent = true
 		}
 		if chunk.ContentBlock != nil {
-			writeSSE(w, flusher, canFlush, map[string]interface{}{
-				"id":      completionID,
-				"object":  "chat.completion.chunk",
-				"created": created,
-				"model":   chunk.Model,
-				"choices": []map[string]interface{}{
-					{"index": 0, "delta": map[string]interface{}{"content": []interface{}{chunk.ContentBlock}}, "finish_reason": nil},
-				},
-			})
-			hasSentContent = true
+			if text := textFromContentBlock(chunk.ContentBlock); text != "" {
+				writeSSE(w, flusher, canFlush, map[string]interface{}{
+					"id":      completionID,
+					"object":  "chat.completion.chunk",
+					"created": created,
+					"model":   chunk.Model,
+					"choices": []map[string]interface{}{
+						{"index": 0, "delta": map[string]string{"content": text}, "finish_reason": nil},
+					},
+				})
+				hasSentContent = true
+			}
 		}
 	}
 
@@ -1557,7 +1574,6 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 	w.Header().Set("Content-Type", "application/json")
 
 	var content string
-	var contentBlocks []interface{}
 	var usage *provider.Usage
 	for chunk := range result.Stream {
 		if chunk.Error != nil {
@@ -1570,7 +1586,7 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 		}
 		content += chunk.Content
 		if chunk.ContentBlock != nil {
-			contentBlocks = append(contentBlocks, chunk.ContentBlock)
+			content += textFromContentBlock(chunk.ContentBlock)
 		}
 		if chunk.Usage != nil {
 			usage = chunk.Usage
@@ -1585,13 +1601,7 @@ func (s *Server) writeOpenAINonStream(w http.ResponseWriter, result *router.Rout
 		rs.tokensIn = usage.InputTokens
 		rs.tokensOut = usage.OutputTokens
 	}
-	messageContent := interface{}(content)
-	if len(contentBlocks) > 0 {
-		if content != "" {
-			contentBlocks = append(contentBlocks, map[string]interface{}{"type": "text", "text": content})
-		}
-		messageContent = contentBlocks
-	}
+	messageContent := content
 
 	resp := map[string]interface{}{
 		"id":      fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()),
@@ -2686,6 +2696,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"active_models": activeModels,
 		"endpoints": []string{
 			"POST /v1/chat/completions",
+			"POST /chat/completions",
 			"POST /v1/messages",
 			"GET  /v1/models",
 			"GET  /health",
