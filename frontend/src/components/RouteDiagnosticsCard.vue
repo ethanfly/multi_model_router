@@ -20,6 +20,7 @@ interface RouteDiagnostics {
   classificationInput?: string
   classificationMethod?: string
   complexity?: string
+  taskType?: string
   estimatedTokens?: number
   selectedModel?: string
   fallbackUsed?: boolean
@@ -70,6 +71,7 @@ function formatScore(score?: number): string {
         <div v-if="diagnostics" class="diagnostics-pills">
           <span v-if="diagnostics.mode" class="diag-pill">{{ diagnostics.mode }}</span>
           <span v-if="diagnostics.complexity" class="diag-pill">{{ diagnostics.complexity }}</span>
+          <span v-if="diagnostics.taskType" class="diag-pill">{{ diagnostics.taskType }}</span>
           <span v-if="diagnostics.selectedModel" class="diag-pill">picked: {{ diagnostics.selectedModel }}</span>
           <span v-if="diagnostics.estimatedTokens" class="diag-pill">est: {{ diagnostics.estimatedTokens }}</span>
           <span v-if="diagnostics.fallbackUsed" class="diag-pill warning">fallback</span>

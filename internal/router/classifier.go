@@ -44,9 +44,42 @@ func (c Complexity) String() string {
 	}
 }
 
+// TaskType describes the dominant work style in a request.
+type TaskType int
+
+const (
+	TaskGeneral TaskType = iota
+	TaskFast
+	TaskCoding
+	TaskDebugging
+	TaskAgentic
+	TaskArchitecture
+	TaskCreative
+)
+
+func (t TaskType) String() string {
+	switch t {
+	case TaskFast:
+		return "fast"
+	case TaskCoding:
+		return "coding"
+	case TaskDebugging:
+		return "debugging"
+	case TaskAgentic:
+		return "agentic"
+	case TaskArchitecture:
+		return "architecture"
+	case TaskCreative:
+		return "creative"
+	default:
+		return "general"
+	}
+}
+
 // ClassificationResult holds the result of classifying a question.
 type ClassificationResult struct {
 	Complexity Complexity
+	TaskType   TaskType
 	Confidence float64
 	Method     string
 }
@@ -187,6 +220,7 @@ func (c *Classifier) Classify(ctx context.Context, question string) (*Classifica
 		if err == nil {
 			return &ClassificationResult{
 				Complexity: complexity,
+				TaskType:   result.TaskType,
 				Confidence: 0.8,
 				Method:     "model",
 			}, nil
@@ -196,6 +230,7 @@ func (c *Classifier) Classify(ctx context.Context, question string) (*Classifica
 	// Fallback to Medium
 	return &ClassificationResult{
 		Complexity: Medium,
+		TaskType:   result.TaskType,
 		Confidence: 0.5,
 		Method:     "fallback",
 	}, nil
@@ -313,11 +348,58 @@ func (c *Classifier) classifyByRules(question string) *ClassificationResult {
 		confidence = 1.0
 	}
 
+	taskType := detectTaskType(trimmed, lowerQ, complexity, simpleHits, codingHits, reasoningHits, multiStepHits, mathHits)
+
 	return &ClassificationResult{
 		Complexity: complexity,
+		TaskType:   taskType,
 		Confidence: confidence,
 		Method:     "rules",
 	}
+}
+
+func detectTaskType(question, lowerQ string, complexity Complexity, simpleHits, codingHits, reasoningHits, multiStepHits, mathHits int) TaskType {
+	if stackTraceRe.MatchString(question) || containsAny(lowerQ, []string{
+		"debug", "bug", "error", "exception", "panic", "traceback", "stack trace",
+		"root cause", "failing test", "fix test", "crash", "hang", "timeout",
+	}) {
+		return TaskDebugging
+	}
+	if containsAny(lowerQ, []string{
+		"agent", "agents", "multi-agent", "tool use", "tool-use", "tool call", "tool-call",
+		"function calling", "mcp", "claude code", "codex", "gemini cli", "opencode",
+		"openclaw", "cli integration", "terminal", "shell command", "browser automation",
+	}) {
+		return TaskAgentic
+	}
+	if containsAny(lowerQ, []string{
+		"architecture", "architect", "system design", "distributed", "scalability",
+		"fault tolerance", "trade-off", "tradeoff", "compare", "migration plan",
+	}) || reasoningHits+multiStepHits+mathHits >= 3 {
+		return TaskArchitecture
+	}
+	if codingHits > 0 || codeBlockRe.MatchString(question) || codeSignalRe.MatchString(question) || pathSignalRe.MatchString(question) {
+		return TaskCoding
+	}
+	if containsAny(lowerQ, []string{
+		"creative", "story", "announcement", "headline", "copy", "tone", "rewrite",
+		"polish", "blog post", "marketing", "slogan", "brainstorm",
+	}) {
+		return TaskCreative
+	}
+	if complexity == Simple || simpleHits > 0 {
+		return TaskFast
+	}
+	return TaskGeneral
+}
+
+func containsAny(s string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(s, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func abs(x float64) float64 {

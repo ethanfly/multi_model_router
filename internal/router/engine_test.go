@@ -858,3 +858,110 @@ func TestRouteRace_SkipsModelsAtCapacity(t *testing.T) {
 		t.Fatalf("expected at-capacity model to be skipped, got %q", result.ModelName)
 	}
 }
+
+func TestSelectModel_AgenticCodingUsesBenchmarkProfile(t *testing.T) {
+	e := NewEngine(NewClassifier(nil, nil))
+
+	generalFrontier := &ModelConfig{
+		ID:             "gpt",
+		Name:           "GPT5.5",
+		Provider:       "openai",
+		ModelID:        "gpt-5.5",
+		Reasoning:      9,
+		Coding:         9,
+		Creativity:     9,
+		Speed:          8,
+		CostEfficiency: 5,
+		IsActive:       true,
+	}
+	agenticCoder := &ModelConfig{
+		ID:             "kimi",
+		Name:           "Kimi K2.6",
+		Provider:       "openai",
+		ModelID:        "Kimi-K2.6",
+		Reasoning:      8,
+		Coding:         9,
+		Creativity:     8,
+		Speed:          6,
+		CostEfficiency: 7,
+		IsActive:       true,
+	}
+	balancedFast := &ModelConfig{
+		ID:             "minimax",
+		Name:           "MiniMax",
+		Provider:       "anthropic",
+		ModelID:        "MiniMax-M2.7-highspeed",
+		Reasoning:      8,
+		Coding:         8,
+		Creativity:     8,
+		Speed:          8,
+		CostEfficiency: 9,
+		IsActive:       true,
+	}
+
+	e.SetModels([]*ModelConfig{generalFrontier, agenticCoder, balancedFast})
+	req := &RouteRequest{
+		Messages: []provider.Message{{Role: "user", Content: "Implement a multi-agent CLI integration for Claude Code and Codex, preserve tool-use streams, and fix failing Go tests."}},
+		Mode:     RouteAuto,
+	}
+
+	selection := e.ExplainSelection(context.Background(), req)
+	if selection == nil || selection.Model == nil {
+		t.Fatalf("expected selection, got %#v", selection)
+	}
+	if selection.Model.ID != "kimi" {
+		t.Fatalf("expected Kimi profile to win agentic coding route, got %s", selection.Model.Name)
+	}
+	if selection.Diagnostics == nil || selection.Diagnostics.TaskType != TaskAgentic.String() {
+		t.Fatalf("expected agentic diagnostics, got %#v", selection.Diagnostics)
+	}
+	if !strings.Contains(selection.Diagnostics.Summary, "task=agentic") {
+		t.Fatalf("expected task type in summary, got %q", selection.Diagnostics.Summary)
+	}
+}
+
+func TestSelectModel_SimplePromptUsesFastValueProfile(t *testing.T) {
+	e := NewEngine(NewClassifier(nil, nil))
+
+	expensive := &ModelConfig{
+		ID:             "gpt",
+		Name:           "GPT5.5",
+		Provider:       "openai",
+		ModelID:        "gpt-5.5",
+		Reasoning:      9,
+		Coding:         9,
+		Creativity:     9,
+		Speed:          8,
+		CostEfficiency: 5,
+		IsActive:       true,
+	}
+	fast := &ModelConfig{
+		ID:             "minimax",
+		Name:           "MiniMax",
+		Provider:       "anthropic",
+		ModelID:        "MiniMax-M2.7-highspeed",
+		Reasoning:      8,
+		Coding:         8,
+		Creativity:     8,
+		Speed:          8,
+		CostEfficiency: 9,
+		IsActive:       true,
+	}
+
+	e.SetModels([]*ModelConfig{expensive, fast})
+	req := &RouteRequest{
+		Messages: []provider.Message{{Role: "user", Content: "translate this sentence"}},
+		Mode:     RouteAuto,
+	}
+
+	selection := e.ExplainSelection(context.Background(), req)
+	if selection == nil || selection.Model == nil {
+		t.Fatalf("expected selection, got %#v", selection)
+	}
+	if selection.Model.ID != "minimax" {
+		t.Fatalf("expected fast value model for simple prompt, got %s", selection.Model.Name)
+	}
+	if selection.Diagnostics.TaskType != TaskFast.String() {
+		t.Fatalf("expected fast diagnostics, got %q", selection.Diagnostics.TaskType)
+	}
+}

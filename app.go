@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"multi_model_router/internal/agentconfig"
 	"multi_model_router/internal/config"
 	"multi_model_router/internal/core"
 	"multi_model_router/internal/provider"
@@ -312,6 +313,44 @@ func (a *App) SetConfig(key, value string) string {
 		return "error: " + err.Error()
 	}
 	return "OK"
+}
+
+func (a *App) PreviewAgentConfig(port int, apiKey, model string) string {
+	return a.configureAgents(port, apiKey, model, true)
+}
+
+func (a *App) ApplyAgentConfig(port int, apiKey, model string) string {
+	return a.configureAgents(port, apiKey, model, false)
+}
+
+func (a *App) configureAgents(port int, apiKey, model string, dryRun bool) string {
+	if port <= 0 {
+		status := a.core.GetProxyStatus()
+		port = status.Port
+		if port <= 0 {
+			port = a.core.Config().ProxyPort
+		}
+	}
+	if apiKey == "" {
+		apiKey = a.core.GetConfig("proxy_api_key")
+	}
+	if model == "" {
+		model = "auto"
+	}
+
+	result, err := agentconfig.Configure(agentconfig.Options{
+		Apps:   []string{"all"},
+		Port:   port,
+		APIKey: apiKey,
+		Model:  model,
+		DryRun: dryRun,
+	})
+	if err != nil {
+		return string(marshalJSON(map[string]any{
+			"error": err.Error(),
+		}))
+	}
+	return string(marshalJSON(result))
 }
 
 // marshalJSON is a helper to JSON-marshal a value, returning empty slice on error.

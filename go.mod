@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
 	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/yosuke-furukawa/json5 v0.1.1
 	golang.org/x/crypto v0.50.0
 	golang.org/x/sys v0.43.0
 	modernc.org/sqlite v1.49.1

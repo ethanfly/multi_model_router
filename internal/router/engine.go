@@ -68,14 +68,16 @@ func (r RouteMode) String() string {
 	}
 }
 
-// complexityWeights maps complexity levels to weighted scoring dimensions.
-var complexityWeights = map[Complexity]struct {
+type scoreWeights struct {
 	Reasoning      float64
 	Coding         float64
 	Creativity     float64
 	Speed          float64
 	CostEfficiency float64
-}{
+}
+
+// complexityWeights maps complexity levels to weighted scoring dimensions.
+var complexityWeights = map[Complexity]scoreWeights{
 	Simple: {
 		Reasoning:      0.1,
 		Coding:         0.1,
@@ -97,6 +99,153 @@ var complexityWeights = map[Complexity]struct {
 		Speed:          0.1,
 		CostEfficiency: 0.1,
 	},
+}
+
+var taskWeights = map[TaskType]scoreWeights{
+	TaskFast: {
+		Reasoning:      0.05,
+		Coding:         0.05,
+		Creativity:     0.05,
+		Speed:          0.3,
+		CostEfficiency: 0.55,
+	},
+	TaskCoding: {
+		Reasoning:      0.22,
+		Coding:         0.48,
+		Creativity:     0.05,
+		Speed:          0.12,
+		CostEfficiency: 0.13,
+	},
+	TaskDebugging: {
+		Reasoning:      0.35,
+		Coding:         0.4,
+		Creativity:     0.03,
+		Speed:          0.1,
+		CostEfficiency: 0.12,
+	},
+	TaskAgentic: {
+		Reasoning:      0.25,
+		Coding:         0.35,
+		Creativity:     0.1,
+		Speed:          0.15,
+		CostEfficiency: 0.15,
+	},
+	TaskArchitecture: {
+		Reasoning:      0.45,
+		Coding:         0.25,
+		Creativity:     0.08,
+		Speed:          0.08,
+		CostEfficiency: 0.14,
+	},
+	TaskCreative: {
+		Reasoning:      0.18,
+		Coding:         0.05,
+		Creativity:     0.45,
+		Speed:          0.14,
+		CostEfficiency: 0.18,
+	},
+}
+
+func weightsForRoute(complexity Complexity, taskType TaskType) scoreWeights {
+	if weights, ok := taskWeights[taskType]; ok {
+		return weights
+	}
+	if weights, ok := complexityWeights[complexity]; ok {
+		return weights
+	}
+	return complexityWeights[Medium]
+}
+
+type modelRoutingProfile struct {
+	Reason        string
+	FastBonus     float64
+	CodingBonus   float64
+	AgenticBonus  float64
+	ReasonBonus   float64
+	CreativeBonus float64
+	GeneralBonus  float64
+}
+
+func (p modelRoutingProfile) Bonus(taskType TaskType) float64 {
+	switch taskType {
+	case TaskFast:
+		return p.FastBonus + p.GeneralBonus
+	case TaskCoding, TaskDebugging:
+		return p.CodingBonus + p.ReasonBonus*0.4 + p.GeneralBonus
+	case TaskAgentic:
+		return p.AgenticBonus + p.CodingBonus*0.4 + p.ReasonBonus*0.2 + p.GeneralBonus
+	case TaskArchitecture:
+		return p.ReasonBonus + p.CodingBonus*0.25 + p.GeneralBonus
+	case TaskCreative:
+		return p.CreativeBonus + p.ReasonBonus*0.2 + p.GeneralBonus
+	default:
+		return p.GeneralBonus
+	}
+}
+
+func routingProfileForModel(model *ModelConfig) modelRoutingProfile {
+	if model == nil {
+		return modelRoutingProfile{}
+	}
+	key := strings.ToLower(strings.Join([]string{model.Name, model.ModelID, model.Provider, model.BaseURL}, " "))
+
+	switch {
+	case strings.Contains(key, "kimi-k2.6") || strings.Contains(key, "kimi k2.6"):
+		return modelRoutingProfile{
+			Reason:       "benchmark profile: Kimi K2.6 is weighted toward coding and agentic tool workflows",
+			CodingBonus:  0.75,
+			AgenticBonus: 1.1,
+			ReasonBonus:  0.35,
+			GeneralBonus: 0.05,
+		}
+	case strings.Contains(key, "glm-5.1") || strings.Contains(key, "glm 5.1"):
+		return modelRoutingProfile{
+			Reason:       "benchmark profile: GLM 5.1 is weighted toward coding, reasoning, and efficient agent work",
+			FastBonus:    0.2,
+			CodingBonus:  0.65,
+			AgenticBonus: 0.55,
+			ReasonBonus:  0.55,
+			GeneralBonus: 0.1,
+		}
+	case strings.Contains(key, "gpt-5.5") || strings.Contains(key, "gpt5.5"):
+		return modelRoutingProfile{
+			Reason:        "benchmark profile: GPT-5.5 is weighted as a frontier general reasoning and coding model",
+			FastBonus:     0.1,
+			CodingBonus:   0.55,
+			AgenticBonus:  0.45,
+			ReasonBonus:   0.75,
+			CreativeBonus: 0.45,
+			GeneralBonus:  0.15,
+		}
+	case strings.Contains(key, "deepseek-v4-pro") || strings.Contains(key, "deepseekv4") || strings.Contains(key, "deepseek v4"):
+		return modelRoutingProfile{
+			Reason:        "benchmark profile: DeepSeek V4 Pro is weighted toward strong reasoning, coding, and broad generation",
+			CodingBonus:   0.6,
+			AgenticBonus:  0.35,
+			ReasonBonus:   0.65,
+			CreativeBonus: 0.25,
+			GeneralBonus:  0.05,
+		}
+	case strings.Contains(key, "minimax-m2.7") || strings.Contains(key, "m2.7-highspeed") || strings.Contains(key, "minimax"):
+		return modelRoutingProfile{
+			Reason:       "benchmark profile: MiniMax M2.7 highspeed is weighted toward speed, cost, and balanced agent work",
+			FastBonus:    1.1,
+			CodingBonus:  0.2,
+			AgenticBonus: 0.35,
+			ReasonBonus:  0.15,
+			GeneralBonus: 0.15,
+		}
+	case strings.Contains(key, "gemma-4") || strings.Contains(key, "gemma4"):
+		return modelRoutingProfile{
+			Reason:       "benchmark profile: Gemma 4 26B is weighted toward low-cost local/private simple work",
+			FastBonus:    1.0,
+			CodingBonus:  -0.1,
+			ReasonBonus:  -0.15,
+			GeneralBonus: 0.05,
+		}
+	default:
+		return modelRoutingProfile{}
+	}
 }
 
 // RouteRequest is the input to the router engine.
@@ -130,6 +279,7 @@ type RouteDiagnostics struct {
 	ClassificationInput  string                `json:"classificationInput,omitempty"`
 	ClassificationMethod string                `json:"classificationMethod,omitempty"`
 	Complexity           string                `json:"complexity,omitempty"`
+	TaskType             string                `json:"taskType,omitempty"`
 	EstimatedTokens      int                   `json:"estimatedTokens,omitempty"`
 	SelectedModel        string                `json:"selectedModel,omitempty"`
 	FallbackUsed         bool                  `json:"fallbackUsed"`
@@ -183,6 +333,7 @@ type candidateEvaluation struct {
 	score     float64
 	eligible  bool
 	reason    string
+	profile   string
 	recentRPM int
 	recentTPM int
 }
@@ -290,7 +441,7 @@ func (e *Engine) ExplainSelection(ctx context.Context, req *RouteRequest) *Selec
 				},
 			}
 		}
-		evaluations := e.evaluateCandidates(classResult.Complexity, req, nil)
+		evaluations := e.evaluateCandidates(classResult.Complexity, classResult.TaskType, req, nil)
 		models := eligibleModels(evaluations)
 		diagnostics := diagnosticsFromEvaluations(req.Mode.String(), question, classResult, estimateRequestTokens(req).totalTokens, evaluations)
 		if len(models) == 0 {
@@ -324,7 +475,7 @@ func (e *Engine) routeAuto(ctx context.Context, req *RouteRequest) *RouteResult 
 	}
 
 	estimate := estimateRequestTokens(req)
-	evaluations := e.evaluateCandidates(classResult.Complexity, req, nil)
+	evaluations := e.evaluateCandidates(classResult.Complexity, classResult.TaskType, req, nil)
 	diagnostics := diagnosticsFromEvaluations(RouteAuto.String(), question, classResult, estimate.totalTokens, evaluations)
 	candidates := eligibleModels(evaluations)
 	if len(candidates) == 0 {
@@ -550,7 +701,7 @@ func (e *Engine) routeRace(ctx context.Context, req *RouteRequest) *RouteResult 
 
 // selectModel selects the best model for the given complexity using weighted scoring.
 func (e *Engine) selectModel(complexity Complexity, req *RouteRequest) *ModelConfig {
-	candidates := e.rankedCandidates(complexity, req, nil)
+	candidates := e.rankedCandidates(complexity, TaskGeneral, req, nil)
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -559,7 +710,7 @@ func (e *Engine) selectModel(complexity Complexity, req *RouteRequest) *ModelCon
 
 // selectModelFallback selects a fallback model, excluding the given model ID.
 func (e *Engine) selectModelFallback(complexity Complexity, req *RouteRequest, excludeID string) *ModelConfig {
-	candidates := e.rankedCandidates(complexity, req, map[string]bool{excludeID: true})
+	candidates := e.rankedCandidates(complexity, TaskGeneral, req, map[string]bool{excludeID: true})
 	if len(candidates) == 0 {
 		return nil
 	}
@@ -618,8 +769,8 @@ func (e *Engine) isRateLimited(modelID string) bool {
 	return e.isRateLimitedLocked(modelID, time.Now())
 }
 
-func (e *Engine) rankedCandidates(complexity Complexity, req *RouteRequest, exclude map[string]bool) []*ModelConfig {
-	return eligibleModels(e.evaluateCandidates(complexity, req, exclude))
+func (e *Engine) rankedCandidates(complexity Complexity, taskType TaskType, req *RouteRequest, exclude map[string]bool) []*ModelConfig {
+	return eligibleModels(e.evaluateCandidates(complexity, taskType, req, exclude))
 }
 
 func (e *Engine) raceCandidates(req *RouteRequest) []*ModelConfig {
@@ -644,14 +795,11 @@ func (e *Engine) raceCandidates(req *RouteRequest) []*ModelConfig {
 	return candidates
 }
 
-func (e *Engine) evaluateCandidates(complexity Complexity, req *RouteRequest, exclude map[string]bool) []candidateEvaluation {
+func (e *Engine) evaluateCandidates(complexity Complexity, taskType TaskType, req *RouteRequest, exclude map[string]bool) []candidateEvaluation {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	weights, ok := complexityWeights[complexity]
-	if !ok {
-		weights = complexityWeights[Medium]
-	}
+	weights := weightsForRoute(complexity, taskType)
 
 	now := time.Now()
 	estimate := estimateRequestTokens(req)
@@ -689,12 +837,15 @@ func (e *Engine) evaluateCandidates(complexity Complexity, req *RouteRequest, ex
 		case m.MaxTPM > 0 && evaluation.recentTPM+estimate.totalTokens > m.MaxTPM:
 			evaluation.reason = fmt.Sprintf("tpm capacity exceeded (%d+%d>%d)", evaluation.recentTPM, estimate.totalTokens, m.MaxTPM)
 		default:
+			profile := routingProfileForModel(m)
 			evaluation.eligible = true
+			evaluation.profile = profile.Reason
 			evaluation.score = weights.Reasoning*float64(m.Reasoning) +
 				weights.Coding*float64(m.Coding) +
 				weights.Creativity*float64(m.Creativity) +
 				weights.Speed*float64(m.Speed) +
-				weights.CostEfficiency*float64(m.CostEfficiency)
+				weights.CostEfficiency*float64(m.CostEfficiency) +
+				profile.Bonus(taskType)
 		}
 
 		evaluations = append(evaluations, evaluation)
@@ -977,16 +1128,21 @@ func diagnosticsFromEvaluations(mode, classificationInput string, classResult *C
 	if classResult != nil {
 		diagnostics.ClassificationMethod = classResult.Method
 		diagnostics.Complexity = classResult.Complexity.String()
+		diagnostics.TaskType = classResult.TaskType.String()
 	}
 
 	for _, evaluation := range evaluations {
+		reason := evaluation.reason
+		if reason == "" && evaluation.profile != "" {
+			reason = evaluation.profile
+		}
 		candidate := CandidateDiagnostic{
 			Name:      evaluation.model.Name,
 			ModelID:   evaluation.model.ModelID,
 			Provider:  evaluation.model.Provider,
 			Eligible:  evaluation.eligible,
 			Score:     evaluation.score,
-			Reason:    evaluation.reason,
+			Reason:    reason,
 			RecentRPM: evaluation.recentRPM,
 			RecentTPM: evaluation.recentTPM,
 			MaxRPM:    evaluation.model.MaxRPM,
@@ -1056,6 +1212,9 @@ func diagnosticsSummary(diagnostics *RouteDiagnostics) string {
 	parts := []string{fmt.Sprintf("mode=%s", diagnostics.Mode)}
 	if diagnostics.Complexity != "" {
 		parts = append(parts, fmt.Sprintf("complexity=%s", diagnostics.Complexity))
+	}
+	if diagnostics.TaskType != "" {
+		parts = append(parts, fmt.Sprintf("task=%s", diagnostics.TaskType))
 	}
 	if diagnostics.ClassificationMethod != "" {
 		parts = append(parts, fmt.Sprintf("method=%s", diagnostics.ClassificationMethod))

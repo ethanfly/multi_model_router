@@ -1,7 +1,28 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn, GetProxyMode, SetProxyMode as SetProxyModeFn, GetActiveModels } from '../../wailsjs/go/main/App'
+import { GetProxyStatus, StartProxy, StopProxy, GetConfig, SetConfig, GetAutoStart, SetAutoStart as SetAutoStartFn, GetProxyMode, SetProxyMode as SetProxyModeFn, GetActiveModels, PreviewAgentConfig, ApplyAgentConfig } from '../../wailsjs/go/main/App'
+
+type AgentChange = {
+  app: string
+  path: string
+  action: string
+  changed: boolean
+  backupPath?: string
+}
+
+type AgentWarning = {
+  app: string
+  path?: string
+  message: string
+}
+
+type AgentConfigResult = {
+  applied: boolean
+  changes: AgentChange[]
+  warnings: AgentWarning[]
+  error?: string
+}
 
 const proxyRunning = ref(false)
 const proxyPort = ref(9680)
@@ -14,6 +35,11 @@ const proxyMode = ref('auto')
 const manualModelId = ref('')
 const proxyApiKey = ref('')
 const activeModels = ref<{modelId: string, name: string}[]>([])
+const agentConfigModel = ref('auto')
+const agentConfigLoading = ref(false)
+const agentConfigApplying = ref(false)
+const agentConfigResult = ref<AgentConfigResult | null>(null)
+const agentConfigError = ref('')
 
 const { locale, t } = useI18n()
 const currentLang = computed({
@@ -117,6 +143,46 @@ async function saveProxyApiKey() {
   try {
     await SetConfig('proxy_api_key', proxyApiKey.value)
   } catch { /* ignore */ }
+}
+
+function parseAgentConfigResult(raw: string): AgentConfigResult {
+  const parsed = raw ? JSON.parse(raw) : {}
+  return {
+    applied: !!parsed.applied,
+    changes: Array.isArray(parsed.changes) ? parsed.changes : [],
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+    error: parsed.error || '',
+  }
+}
+
+async function previewAgentConfig() {
+  agentConfigLoading.value = true
+  agentConfigError.value = ''
+  try {
+    const raw = await PreviewAgentConfig(proxyPort.value, proxyApiKey.value, agentConfigModel.value || 'auto')
+    const result = parseAgentConfigResult(raw)
+    agentConfigResult.value = result
+    if (result.error) agentConfigError.value = result.error
+  } catch (err: any) {
+    agentConfigError.value = err.message || String(err)
+  } finally {
+    agentConfigLoading.value = false
+  }
+}
+
+async function applyAgentConfig() {
+  agentConfigApplying.value = true
+  agentConfigError.value = ''
+  try {
+    const raw = await ApplyAgentConfig(proxyPort.value, proxyApiKey.value, agentConfigModel.value || 'auto')
+    const result = parseAgentConfigResult(raw)
+    agentConfigResult.value = result
+    if (result.error) agentConfigError.value = result.error
+  } catch (err: any) {
+    agentConfigError.value = err.message || String(err)
+  } finally {
+    agentConfigApplying.value = false
+  }
 }
 </script>
 
@@ -241,6 +307,54 @@ async function saveProxyApiKey() {
           />
         </div>
         <div v-if="proxyApiKey" class="api-key-hint">{{ $t('settings.proxyApiKeyHint') }}</div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h3 class="section-title">Agent 接入</h3>
+      <div class="agent-card">
+        <div class="agent-row">
+          <div class="mode-label-group">
+            <span class="mode-label">一键配置多 Agent</span>
+            <span class="mode-desc">写入 Claude Code、Codex、Gemini CLI、OpenCode、OpenClaw 的本地配置，让它们接入当前反代。</span>
+          </div>
+          <div class="agent-controls">
+            <input
+              v-model="agentConfigModel"
+              class="agent-model-input"
+              placeholder="auto"
+              autocomplete="off"
+            />
+            <button class="btn btn-secondary" :disabled="agentConfigLoading || agentConfigApplying" @click="previewAgentConfig">
+              {{ agentConfigLoading ? '...' : '预览' }}
+            </button>
+            <button class="btn btn-start" :disabled="agentConfigLoading || agentConfigApplying" @click="applyAgentConfig">
+              {{ agentConfigApplying ? '...' : '应用配置' }}
+            </button>
+          </div>
+        </div>
+        <div class="agent-hint">
+          OpenAI 兼容地址：<code>http://127.0.0.1:{{ proxyPort }}/v1</code>
+          <span>Anthropic 兼容地址：<code>http://127.0.0.1:{{ proxyPort }}</code></span>
+        </div>
+        <div v-if="agentConfigError" class="agent-error">{{ agentConfigError }}</div>
+        <div v-if="agentConfigResult" class="agent-result">
+          <div class="agent-result-title">{{ agentConfigResult.applied ? '已应用' : '预览结果' }}</div>
+          <div v-if="agentConfigResult.changes.length" class="agent-change-list">
+            <div v-for="change in agentConfigResult.changes" :key="change.app + change.path" class="agent-change">
+              <span class="agent-app">{{ change.app }}</span>
+              <span :class="['agent-action', change.changed ? 'changed' : 'unchanged']">{{ change.action }}</span>
+              <code>{{ change.path }}</code>
+              <span v-if="change.backupPath" class="agent-backup">backup: {{ change.backupPath }}</span>
+            </div>
+          </div>
+          <div v-if="agentConfigResult.warnings.length" class="agent-warning-list">
+            <div v-for="warning in agentConfigResult.warnings" :key="warning.app + warning.message" class="agent-warning">
+              <span>{{ warning.app }}</span>
+              {{ warning.message }}
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </div>
@@ -628,5 +742,155 @@ async function saveProxyApiKey() {
 
 .model-select:focus {
   border-color: var(--primary);
+}
+
+.agent-card {
+  background: rgba(30, 41, 59, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(71, 85, 105, 0.4);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.agent-model-input {
+  width: 120px;
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  outline: none;
+}
+
+.agent-model-input:focus {
+  border-color: var(--primary);
+}
+
+.agent-hint {
+  margin-top: 12px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-hint code,
+.agent-change code {
+  background-color: var(--bg);
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--primary);
+  border: 1px solid rgba(71, 85, 105, 0.3);
+  overflow-wrap: anywhere;
+}
+
+.agent-error {
+  margin-top: 12px;
+  color: var(--error);
+  font-size: 13px;
+}
+
+.agent-result {
+  margin-top: 14px;
+  border-top: 1px solid rgba(71, 85, 105, 0.3);
+  padding-top: 14px;
+}
+
+.agent-result-title {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.agent-change-list,
+.agent-warning-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-warning-list {
+  margin-top: 10px;
+}
+
+.agent-change,
+.agent-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.agent-app {
+  min-width: 76px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.agent-action {
+  color: var(--text-muted);
+}
+
+.agent-action.changed {
+  color: var(--success);
+}
+
+.agent-action.unchanged {
+  color: var(--text-muted);
+}
+
+.agent-backup {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.agent-warning {
+  color: #fbbf24;
+}
+
+.agent-warning span {
+  color: var(--text);
+  font-weight: 600;
+}
+
+@media (max-width: 760px) {
+  .agent-row,
+  .mode-row,
+  .manual-model-row,
+  .api-key-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .agent-controls {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .api-key-input,
+  .model-select {
+    width: 100%;
+  }
 }
 </style>
