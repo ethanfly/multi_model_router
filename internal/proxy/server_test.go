@@ -150,6 +150,39 @@ func TestConvertMessagesForUpstream_OpenAIImageToAnthropicImage(t *testing.T) {
 	}
 }
 
+func TestConvertMessagesForUpstream_DropsUnsupportedOpenAIContentForAnthropic(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role":"user","content":[
+				{"type":"text","text":"keep"},
+				{"type":"input_audio","input_audio":{"data":"abc","format":"wav"}},
+				{"type":"unknown_openai_block","value":"drop"},
+				{"type":"thinking","thinking":"preserve"}
+			]}
+		]`),
+	}
+
+	convertMessagesForUpstream(reqMap, false, true)
+
+	var msgs []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(reqMap["messages"], &msgs); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	var blocks []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	}
+	if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+		t.Fatalf("decode content blocks: %v", err)
+	}
+	if len(blocks) != 2 || blocks[0].Type != "text" || blocks[0].Text != "keep" || blocks[1].Type != "thinking" || blocks[1].Thinking != "preserve" {
+		t.Fatalf("unexpected filtered Anthropic blocks: %+v", blocks)
+	}
+}
+
 func TestConvertMessagesForUpstream_AnthropicToolUseAndResultToOpenAI(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"messages": json.RawMessage(`[
@@ -182,6 +215,42 @@ func TestConvertMessagesForUpstream_AnthropicToolUseAndResultToOpenAI(t *testing
 	}
 	if msgs[1].Role != "tool" || msgs[1].ToolCallID != "call_1" || msgs[1].Content != "sunny" {
 		t.Fatalf("unexpected tool_result conversion: %+v", msgs[1])
+	}
+}
+
+func TestConvertMessagesForUpstream_AnthropicToolResultKeepsFollowingText(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"messages": json.RawMessage(`[
+			{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_1","content":"sunny"},
+				{"type":"text","text":"now summarize"}
+			]}
+		]`),
+	}
+
+	convertMessagesForUpstream(reqMap, true, false)
+
+	var msgs []struct {
+		Role       string          `json:"role"`
+		Content    string          `json:"content"`
+		ToolCallID string          `json:"tool_call_id"`
+		ToolCalls  json.RawMessage `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(reqMap["messages"], &msgs); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected assistant, tool, and user messages, got %+v", msgs)
+	}
+	if msgs[0].Role != "assistant" || len(msgs[0].ToolCalls) == 0 {
+		t.Fatalf("unexpected assistant conversion: %+v", msgs[0])
+	}
+	if msgs[1].Role != "tool" || msgs[1].ToolCallID != "call_1" || msgs[1].Content != "sunny" {
+		t.Fatalf("unexpected tool message: %+v", msgs[1])
+	}
+	if msgs[2].Role != "user" || msgs[2].Content != "now summarize" {
+		t.Fatalf("expected following text to become a user message, got %+v", msgs[2])
 	}
 }
 
@@ -218,6 +287,69 @@ func TestConvertRequestParameters_OpenAIToAnthropic(t *testing.T) {
 	}
 }
 
+func TestConvertRequestParameters_OpenAIToAnthropicExtendedFields(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"stop":                   json.RawMessage(`"END"`),
+		"safety_identifier":      json.RawMessage(`"safe_123"`),
+		"response_format":        json.RawMessage(`{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}`),
+		"reasoning_effort":       json.RawMessage(`"xhigh"`),
+		"prompt_cache_retention": json.RawMessage(`"24h"`),
+		"web_search_options":     json.RawMessage(`{"user_location":{"approximate":{"city":"San Francisco","region":"CA","country":"US"}}}`),
+		"parallel_tool_calls":    json.RawMessage(`false`),
+		"service_tier":           json.RawMessage(`"default"`),
+	}
+
+	convertRequestParametersForUpstream(reqMap, false, true)
+
+	if string(reqMap["stop_sequences"]) != `["END"]` {
+		t.Fatalf("expected string stop mapped to stop_sequences array, got %s", string(reqMap["stop_sequences"]))
+	}
+	var metadata map[string]string
+	if err := json.Unmarshal(reqMap["metadata"], &metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if metadata["user_id"] != "safe_123" {
+		t.Fatalf("expected safety_identifier mapped to metadata.user_id, got %+v", metadata)
+	}
+	var outputConfig struct {
+		Effort string `json:"effort"`
+		Format struct {
+			Type   string         `json:"type"`
+			Schema map[string]any `json:"schema"`
+		} `json:"format"`
+	}
+	if err := json.Unmarshal(reqMap["output_config"], &outputConfig); err != nil {
+		t.Fatalf("decode output_config: %v", err)
+	}
+	if outputConfig.Effort != "max" || outputConfig.Format.Type != "json_schema" || outputConfig.Format.Schema["type"] != "object" {
+		t.Fatalf("unexpected output_config conversion: %+v", outputConfig)
+	}
+	var cacheControl map[string]string
+	if err := json.Unmarshal(reqMap["cache_control"], &cacheControl); err != nil {
+		t.Fatalf("decode cache_control: %v", err)
+	}
+	if cacheControl["type"] != "ephemeral" || cacheControl["ttl"] != "1h" {
+		t.Fatalf("unexpected cache_control: %+v", cacheControl)
+	}
+	var toolChoice map[string]json.RawMessage
+	if err := json.Unmarshal(reqMap["tool_choice"], &toolChoice); err != nil {
+		t.Fatalf("decode tool_choice: %v", err)
+	}
+	if string(toolChoice["disable_parallel_tool_use"]) != `true` {
+		t.Fatalf("expected parallel tool calls disabled, got %s", string(reqMap["tool_choice"]))
+	}
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(reqMap["tools"], &tools); err != nil {
+		t.Fatalf("decode tools: %v", err)
+	}
+	if len(tools) != 1 || string(tools[0]["type"]) != `"web_search_20250305"` {
+		t.Fatalf("expected Anthropic web search tool, got %+v", tools)
+	}
+	if string(reqMap["service_tier"]) != `"standard_only"` {
+		t.Fatalf("expected service_tier standard_only, got %s", string(reqMap["service_tier"]))
+	}
+}
+
 func TestConvertRequestParameters_AnthropicToOpenAI(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"stop_sequences": json.RawMessage(`["END"]`),
@@ -234,6 +366,46 @@ func TestConvertRequestParameters_AnthropicToOpenAI(t *testing.T) {
 	}
 	if string(reqMap["user"]) != `"user_123"` {
 		t.Fatalf("expected metadata.user_id mapped to user, got %s", string(reqMap["user"]))
+	}
+}
+
+func TestConvertRequestParameters_AnthropicToOpenAIExtendedFields(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"output_config": json.RawMessage(`{"effort":"max","format":{"type":"json_schema","schema":{"type":"object","properties":{"ok":{"type":"boolean"}}}}}`),
+		"thinking":      json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+		"service_tier":  json.RawMessage(`"standard_only"`),
+		"metadata":      json.RawMessage(`{"user_id":"user_123"}`),
+	}
+
+	convertRequestParametersForUpstream(reqMap, true, false)
+
+	if string(reqMap["reasoning_effort"]) != `"xhigh"` {
+		t.Fatalf("expected output_config.effort mapped to reasoning_effort xhigh, got %s", string(reqMap["reasoning_effort"]))
+	}
+	var responseFormat struct {
+		Type       string `json:"type"`
+		JSONSchema struct {
+			Name   string         `json:"name"`
+			Schema map[string]any `json:"schema"`
+		} `json:"json_schema"`
+	}
+	if err := json.Unmarshal(reqMap["response_format"], &responseFormat); err != nil {
+		t.Fatalf("decode response_format: %v", err)
+	}
+	if responseFormat.Type != "json_schema" || responseFormat.JSONSchema.Name != "anthropic_output" || responseFormat.JSONSchema.Schema["type"] != "object" {
+		t.Fatalf("unexpected response_format conversion: %+v", responseFormat)
+	}
+	if _, ok := reqMap["output_config"]; ok {
+		t.Fatal("expected output_config removed for OpenAI target")
+	}
+	if _, ok := reqMap["thinking"]; ok {
+		t.Fatal("expected thinking removed for OpenAI target")
+	}
+	if string(reqMap["user"]) != `"user_123"` || string(reqMap["safety_identifier"]) != `"user_123"` {
+		t.Fatalf("expected metadata.user_id mapped to user and safety_identifier, got user=%s safety_identifier=%s", string(reqMap["user"]), string(reqMap["safety_identifier"]))
+	}
+	if string(reqMap["service_tier"]) != `"default"` {
+		t.Fatalf("expected service_tier default, got %s", string(reqMap["service_tier"]))
 	}
 }
 
@@ -295,7 +467,7 @@ func TestInjectStreamOptions_OnlyForStreaming(t *testing.T) {
 func TestConvertToolsForUpstream_AnthropicToOpenAI(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"tools": json.RawMessage(`[
-			{"name": "get_weather", "description": "Get weather", "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
+			{"name": "get_weather", "description": "Get weather", "strict": true, "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}
 		]`),
 	}
 
@@ -328,12 +500,15 @@ func TestConvertToolsForUpstream_AnthropicToOpenAI(t *testing.T) {
 	if fn["parameters"] == nil {
 		t.Error("expected 'parameters' key (converted from input_schema)")
 	}
+	if string(fn["strict"]) != `true` {
+		t.Errorf("expected strict=true to be preserved, got %s", string(fn["strict"]))
+	}
 }
 
 func TestConvertToolsForUpstream_OpenAIToAnthropic(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"tools": json.RawMessage(`[
-			{"type": "function", "function": {"name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}
+			{"type": "function", "function": {"name": "get_weather", "description": "Get weather", "strict": true, "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}
 		]`),
 	}
 
@@ -356,6 +531,38 @@ func TestConvertToolsForUpstream_OpenAIToAnthropic(t *testing.T) {
 	}
 	if tools[0]["input_schema"] == nil {
 		t.Error("expected 'input_schema' key (converted from parameters)")
+	}
+	if string(tools[0]["strict"]) != `true` {
+		t.Errorf("expected strict=true to be preserved, got %s", string(tools[0]["strict"]))
+	}
+}
+
+func TestConvertToolsForUpstream_AnthropicWebSearchToOpenAIOptions(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"tools": json.RawMessage(`[
+			{"type":"web_search_20250305","name":"web_search","user_location":{"type":"approximate","city":"San Francisco","region":"CA","country":"US"}}
+		]`),
+	}
+
+	convertToolsForUpstream(reqMap, true, false)
+
+	if _, ok := reqMap["tools"]; ok {
+		t.Fatalf("expected Anthropic web search server tool removed from OpenAI tools, got %s", string(reqMap["tools"]))
+	}
+	var opts struct {
+		UserLocation struct {
+			Approximate struct {
+				City    string `json:"city"`
+				Region  string `json:"region"`
+				Country string `json:"country"`
+			} `json:"approximate"`
+		} `json:"user_location"`
+	}
+	if err := json.Unmarshal(reqMap["web_search_options"], &opts); err != nil {
+		t.Fatalf("decode web_search_options: %v", err)
+	}
+	if opts.UserLocation.Approximate.City != "San Francisco" || opts.UserLocation.Approximate.Region != "CA" || opts.UserLocation.Approximate.Country != "US" {
+		t.Fatalf("unexpected web_search_options: %+v", opts)
 	}
 }
 
@@ -429,6 +636,44 @@ func TestConvertToolChoiceForUpstream_OpenAIToAnthropic(t *testing.T) {
 	}
 }
 
+func TestConvertToolChoiceForUpstream_OpenAIAllowedToolsFiltersTools(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"tools": json.RawMessage(`[
+			{"name":"get_weather","input_schema":{"type":"object"}},
+			{"name":"get_time","input_schema":{"type":"object"}}
+		]`),
+		"tool_choice": json.RawMessage(`{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","function":{"name":"get_time"}}]}}`),
+	}
+
+	convertToolChoiceForUpstream(reqMap, false, true)
+
+	if string(reqMap["tool_choice"]) != `{"type":"any"}` {
+		t.Fatalf("expected required allowed tools to map to Anthropic any, got %s", string(reqMap["tool_choice"]))
+	}
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(reqMap["tools"], &tools); err != nil {
+		t.Fatalf("decode filtered tools: %v", err)
+	}
+	if len(tools) != 1 || string(tools[0]["name"]) != `"get_time"` {
+		t.Fatalf("expected tools filtered to get_time, got %+v", tools)
+	}
+}
+
+func TestConvertToolChoiceForUpstream_AnthropicParallelDisableToOpenAI(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"tool_choice": json.RawMessage(`{"type":"auto","disable_parallel_tool_use":true}`),
+	}
+
+	convertToolChoiceForUpstream(reqMap, true, false)
+
+	if string(reqMap["tool_choice"]) != `"auto"` {
+		t.Fatalf("expected tool_choice auto, got %s", string(reqMap["tool_choice"]))
+	}
+	if string(reqMap["parallel_tool_calls"]) != `false` {
+		t.Fatalf("expected parallel_tool_calls=false, got %s", string(reqMap["parallel_tool_calls"]))
+	}
+}
+
 func TestConvertToolChoiceForUpstream_NoToolChoice(t *testing.T) {
 	reqMap := map[string]json.RawMessage{}
 	convertToolChoiceForUpstream(reqMap, true, false)
@@ -441,11 +686,15 @@ func TestConvertToolChoiceForUpstream_NoToolChoice(t *testing.T) {
 
 func TestSanitizeForProvider_OpenAIRemovesUnknown(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
-		"model":       json.RawMessage(`"gpt-4"`),
-		"messages":    json.RawMessage(`[]`),
-		"system":      json.RawMessage(`"you are helpful"`),
-		"thinking":    json.RawMessage(`{"type":"enabled"}`),
-		"temperature": json.RawMessage(`0.7`),
+		"model":                  json.RawMessage(`"gpt-4"`),
+		"messages":               json.RawMessage(`[]`),
+		"system":                 json.RawMessage(`"you are helpful"`),
+		"thinking":               json.RawMessage(`{"type":"enabled"}`),
+		"temperature":            json.RawMessage(`0.7`),
+		"prompt_cache_key":       json.RawMessage(`"cache-key"`),
+		"prompt_cache_retention": json.RawMessage(`"24h"`),
+		"safety_identifier":      json.RawMessage(`"user_hash"`),
+		"verbosity":              json.RawMessage(`"low"`),
 	}
 	sanitizeForProvider(reqMap, "openai")
 
@@ -464,12 +713,20 @@ func TestSanitizeForProvider_OpenAIRemovesUnknown(t *testing.T) {
 	if _, ok := reqMap["temperature"]; !ok {
 		t.Error("expected 'temperature' to be kept")
 	}
+	for _, field := range []string{"prompt_cache_key", "prompt_cache_retention", "safety_identifier", "verbosity"} {
+		if _, ok := reqMap[field]; !ok {
+			t.Errorf("expected %q to be kept for OpenAI provider", field)
+		}
+	}
 }
 
 func TestSanitizeForProvider_AnthropicRemovesUnknown(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"model":             json.RawMessage(`"claude-3"`),
 		"messages":          json.RawMessage(`[]`),
+		"output_config":     json.RawMessage(`{"effort":"high"}`),
+		"cache_control":     json.RawMessage(`{"type":"ephemeral"}`),
+		"inference_geo":     json.RawMessage(`"us"`),
 		"frequency_penalty": json.RawMessage(`0.5`),
 		"presence_penalty":  json.RawMessage(`0.3`),
 		"logprobs":          json.RawMessage(`true`),
@@ -487,6 +744,11 @@ func TestSanitizeForProvider_AnthropicRemovesUnknown(t *testing.T) {
 	}
 	if _, ok := reqMap["model"]; !ok {
 		t.Error("expected 'model' to be kept")
+	}
+	for _, field := range []string{"output_config", "cache_control", "inference_geo"} {
+		if _, ok := reqMap[field]; !ok {
+			t.Errorf("expected %q to be kept for Anthropic provider", field)
+		}
 	}
 }
 
@@ -581,6 +843,54 @@ func TestEnsureMaxTokens_PreservesValid(t *testing.T) {
 	ensureMaxTokens(reqMap, false)
 	if string(reqMap["max_tokens"]) != `8192` {
 		t.Error("expected valid max_tokens to be preserved")
+	}
+}
+
+func TestNormalizeProviderParameterValues_Anthropic(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"temperature":  json.RawMessage(`1.7`),
+		"top_p":        json.RawMessage(`1.2`),
+		"top_k":        json.RawMessage(`0`),
+		"service_tier": json.RawMessage(`"priority"`),
+	}
+
+	normalizeProviderParameterValues(reqMap, true)
+
+	if string(reqMap["temperature"]) != `1` {
+		t.Fatalf("expected Anthropic temperature capped at 1, got %s", string(reqMap["temperature"]))
+	}
+	if string(reqMap["top_p"]) != `1` {
+		t.Fatalf("expected top_p capped at 1, got %s", string(reqMap["top_p"]))
+	}
+	if _, ok := reqMap["top_k"]; ok {
+		t.Fatal("expected invalid top_k removed")
+	}
+	if string(reqMap["service_tier"]) != `"auto"` {
+		t.Fatalf("expected priority service_tier normalized to auto, got %s", string(reqMap["service_tier"]))
+	}
+}
+
+func TestNormalizeProviderParameterValues_OpenAI(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"temperature":      json.RawMessage(`2.5`),
+		"n":                json.RawMessage(`0`),
+		"reasoning_effort": json.RawMessage(`"extreme"`),
+		"verbosity":        json.RawMessage(`"verbose"`),
+		"service_tier":     json.RawMessage(`"standard_only"`),
+	}
+
+	normalizeProviderParameterValues(reqMap, false)
+
+	if string(reqMap["temperature"]) != `2` {
+		t.Fatalf("expected OpenAI temperature capped at 2, got %s", string(reqMap["temperature"]))
+	}
+	for _, field := range []string{"n", "reasoning_effort", "verbosity"} {
+		if _, ok := reqMap[field]; ok {
+			t.Fatalf("expected invalid %s removed", field)
+		}
+	}
+	if string(reqMap["service_tier"]) != `"default"` {
+		t.Fatalf("expected standard_only service_tier normalized to default, got %s", string(reqMap["service_tier"]))
 	}
 }
 
@@ -739,16 +1049,29 @@ func TestSanitizeThinkingForProtocol_AnthropicClientPreservesRedactedThinking(t 
 	}
 }
 
-func TestEnsureMaxTokens_CompletionTokensFallback(t *testing.T) {
+func TestEnsureMaxTokens_PreservesOpenAICompletionTokens(t *testing.T) {
 	reqMap := map[string]json.RawMessage{
 		"max_completion_tokens": json.RawMessage(`2048`),
 	}
 	ensureMaxTokens(reqMap, false)
+	if _, ok := reqMap["max_tokens"]; ok {
+		t.Error("expected max_tokens not to be synthesized for OpenAI target")
+	}
+	if string(reqMap["max_completion_tokens"]) != `2048` {
+		t.Errorf("expected max_completion_tokens to be preserved, got %s", string(reqMap["max_completion_tokens"]))
+	}
+}
+
+func TestEnsureMaxTokens_CompletionTokensFallbackForAnthropic(t *testing.T) {
+	reqMap := map[string]json.RawMessage{
+		"max_completion_tokens": json.RawMessage(`2048`),
+	}
+	ensureMaxTokens(reqMap, true)
 	if string(reqMap["max_tokens"]) != `2048` {
 		t.Errorf("expected max_tokens from max_completion_tokens, got %s", string(reqMap["max_tokens"]))
 	}
 	if _, ok := reqMap["max_completion_tokens"]; ok {
-		t.Error("expected max_completion_tokens to be removed")
+		t.Error("expected max_completion_tokens to be removed for Anthropic target")
 	}
 }
 

@@ -576,6 +576,7 @@ func (s *Server) handleChatCompletion(w http.ResponseWriter, r *http.Request) {
 	convertMessagesForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	convertRequestParametersForUpstream(reqMap, isAnthropic, isTargetAnthropic)
 	preserveCompletionTokenLimit(reqMap, isTargetAnthropic)
+	normalizeProviderParameterValues(reqMap, isTargetAnthropic)
 	sanitizeForProvider(reqMap, modelCfg.Provider)
 	sanitizeThinkingForProtocol(reqMap, isAnthropic, isTargetAnthropic)
 	stripThinkingBlocks(reqMap, isTargetAnthropic)
@@ -2067,15 +2068,26 @@ func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropi
 		}
 
 		if isSourceAnthropic {
+			toolType := rawString(tool["type"])
+			if strings.HasPrefix(toolType, "web_search_") {
+				mergeOpenAIWebSearchOptionsFromAnthropicTool(reqMap, tool)
+				continue
+			}
+			if toolType != "" && tool["input_schema"] == nil {
+				continue
+			}
 			// Anthropic → OpenAI: wrap fields under "function"
 			fn := make(map[string]json.RawMessage)
-			for _, k := range []string{"name", "description"} {
+			for _, k := range []string{"name", "description", "strict"} {
 				if v, ok := tool[k]; ok {
 					fn[k] = v
 				}
 			}
 			if v, ok := tool["input_schema"]; ok {
 				fn["parameters"] = v
+			}
+			if len(fn) == 0 {
+				continue
 			}
 			fnJSON, _ := json.Marshal(fn)
 			out := map[string]json.RawMessage{
@@ -2085,6 +2097,20 @@ func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropi
 			outJSON, _ := json.Marshal(out)
 			converted = append(converted, json.RawMessage(outJSON))
 		} else {
+			toolType := rawString(tool["type"])
+			if toolType == "" && tool["input_schema"] != nil {
+				outJSON, _ := json.Marshal(tool)
+				converted = append(converted, json.RawMessage(outJSON))
+				continue
+			}
+			if strings.HasPrefix(toolType, "web_search_") {
+				outJSON, _ := json.Marshal(tool)
+				converted = append(converted, json.RawMessage(outJSON))
+				continue
+			}
+			if toolType != "" && toolType != "function" {
+				continue
+			}
 			// OpenAI → Anthropic: unwrap "function"
 			fnRaw, ok := tool["function"]
 			if !ok {
@@ -2096,13 +2122,16 @@ func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropi
 				continue
 			}
 			out := make(map[string]json.RawMessage)
-			for _, k := range []string{"name", "description"} {
+			for _, k := range []string{"name", "description", "strict", "cache_control", "max_uses"} {
 				if v, ok := fn[k]; ok {
 					out[k] = v
 				}
 			}
 			if v, ok := fn["parameters"]; ok {
 				out["input_schema"] = v
+			}
+			if len(out) == 0 {
+				continue
 			}
 			outJSON, _ := json.Marshal(out)
 			converted = append(converted, json.RawMessage(outJSON))
@@ -2112,6 +2141,8 @@ func convertToolsForUpstream(reqMap map[string]json.RawMessage, isSourceAnthropi
 	if len(converted) > 0 {
 		arrJSON, _ := json.Marshal(converted)
 		reqMap["tools"] = json.RawMessage(arrJSON)
+	} else {
+		delete(reqMap, "tools")
 	}
 }
 
@@ -2137,6 +2168,12 @@ func convertToolChoiceForUpstream(reqMap map[string]json.RawMessage, isSourceAnt
 		var tc map[string]json.RawMessage
 		if json.Unmarshal(tcRaw, &tc) != nil {
 			return
+		}
+		if rawDisable := tc["disable_parallel_tool_use"]; len(rawDisable) > 0 {
+			var disable bool
+			if json.Unmarshal(rawDisable, &disable) == nil {
+				reqMap["parallel_tool_calls"], _ = json.Marshal(!disable)
+			}
 		}
 		var tcType string
 		json.Unmarshal(tc["type"], &tcType)
@@ -2172,7 +2209,19 @@ func convertToolChoiceForUpstream(reqMap map[string]json.RawMessage, isSourceAnt
 		if json.Unmarshal(tcRaw, &tc) == nil {
 			var tcType string
 			json.Unmarshal(tc["type"], &tcType)
-			if tcType == "function" {
+			if tcType == "allowed_tools" {
+				if allowedRaw := tc["allowed_tools"]; len(allowedRaw) > 0 {
+					mode, names := parseOpenAIAllowedTools(allowedRaw)
+					if len(names) > 0 {
+						filterToolsByName(reqMap, names)
+					}
+					if mode == "required" {
+						reqMap["tool_choice"] = json.RawMessage(`{"type":"any"}`)
+					} else {
+						reqMap["tool_choice"] = json.RawMessage(`{"type":"auto"}`)
+					}
+				}
+			} else if tcType == "function" {
 				if fnRaw := tc["function"]; fnRaw != nil {
 					var fn map[string]json.RawMessage
 					if json.Unmarshal(fnRaw, &fn) == nil {
@@ -2199,13 +2248,27 @@ func convertRequestParametersForUpstream(reqMap map[string]json.RawMessage, isSo
 
 	if isTargetAnthropic {
 		if raw, ok := reqMap["stop"]; ok {
-			reqMap["stop_sequences"] = raw
+			if stop := openAIStopToAnthropic(raw); len(stop) > 0 {
+				reqMap["stop_sequences"] = stop
+			} else {
+				delete(reqMap, "stop_sequences")
+			}
 			delete(reqMap, "stop")
 		}
 		if raw, ok := reqMap["user"]; ok {
 			mergeMetadataUserID(reqMap, raw)
 			delete(reqMap, "user")
 		}
+		if raw, ok := reqMap["safety_identifier"]; ok {
+			mergeMetadataUserID(reqMap, raw)
+			delete(reqMap, "safety_identifier")
+		}
+		convertParallelToolCallsToAnthropic(reqMap)
+		convertResponseFormatToAnthropic(reqMap)
+		convertReasoningToAnthropic(reqMap)
+		convertPromptCacheToAnthropic(reqMap)
+		convertWebSearchOptionsToAnthropic(reqMap)
+		normalizeServiceTierForAnthropic(reqMap)
 		return
 	}
 
@@ -2216,8 +2279,12 @@ func convertRequestParametersForUpstream(reqMap map[string]json.RawMessage, isSo
 	if raw, ok := reqMap["metadata"]; ok {
 		if userID := metadataUserID(raw); userID != nil {
 			reqMap["user"] = userID
+			reqMap["safety_identifier"] = userID
 		}
 	}
+	convertOutputConfigToOpenAI(reqMap)
+	convertThinkingToOpenAI(reqMap)
+	normalizeServiceTierForOpenAI(reqMap)
 }
 
 func mergeMetadataUserID(reqMap map[string]json.RawMessage, userRaw json.RawMessage) {
@@ -2243,6 +2310,386 @@ func metadataUserID(raw json.RawMessage) json.RawMessage {
 		return userID
 	}
 	return nil
+}
+
+func openAIStopToAnthropic(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if strings.TrimSpace(s) == "" {
+			return nil
+		}
+		out, _ := json.Marshal([]string{s})
+		return out
+	}
+	var seqs []string
+	if json.Unmarshal(raw, &seqs) == nil {
+		filtered := make([]string, 0, len(seqs))
+		for _, seq := range seqs {
+			if strings.TrimSpace(seq) != "" {
+				filtered = append(filtered, seq)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil
+		}
+		out, _ := json.Marshal(filtered)
+		return out
+	}
+	return nil
+}
+
+func convertResponseFormatToAnthropic(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["response_format"]
+	if !ok {
+		return
+	}
+	defer delete(reqMap, "response_format")
+
+	var responseFormat map[string]json.RawMessage
+	if json.Unmarshal(raw, &responseFormat) != nil {
+		return
+	}
+
+	formatType := rawString(responseFormat["type"])
+	var format map[string]json.RawMessage
+	switch formatType {
+	case "json_schema":
+		var jsonSchema map[string]json.RawMessage
+		if json.Unmarshal(responseFormat["json_schema"], &jsonSchema) != nil {
+			return
+		}
+		schema := jsonSchema["schema"]
+		if len(schema) == 0 {
+			return
+		}
+		format = map[string]json.RawMessage{
+			"type":   json.RawMessage(`"json_schema"`),
+			"schema": schema,
+		}
+	case "json_object":
+		format = map[string]json.RawMessage{
+			"type":   json.RawMessage(`"json_schema"`),
+			"schema": json.RawMessage(`{"type":"object","additionalProperties":true}`),
+		}
+	default:
+		return
+	}
+
+	outputConfig := outputConfigMap(reqMap)
+	formatRaw, _ := json.Marshal(format)
+	outputConfig["format"] = formatRaw
+	setOutputConfig(reqMap, outputConfig)
+}
+
+func convertOutputConfigToOpenAI(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["output_config"]
+	if !ok {
+		return
+	}
+	defer delete(reqMap, "output_config")
+
+	var outputConfig map[string]json.RawMessage
+	if json.Unmarshal(raw, &outputConfig) != nil {
+		return
+	}
+
+	if effort := rawString(outputConfig["effort"]); effort != "" {
+		if reasoning := anthropicEffortToOpenAIReasoning(effort); reasoning != "" {
+			reqMap["reasoning_effort"], _ = json.Marshal(reasoning)
+		}
+	}
+
+	var format map[string]json.RawMessage
+	if json.Unmarshal(outputConfig["format"], &format) != nil {
+		return
+	}
+	if rawString(format["type"]) != "json_schema" || len(format["schema"]) == 0 {
+		return
+	}
+	resp := map[string]json.RawMessage{
+		"type": json.RawMessage(`"json_schema"`),
+	}
+	jsonSchema := map[string]json.RawMessage{
+		"name":   json.RawMessage(`"anthropic_output"`),
+		"schema": format["schema"],
+	}
+	jsonSchemaRaw, _ := json.Marshal(jsonSchema)
+	resp["json_schema"] = jsonSchemaRaw
+	reqMap["response_format"], _ = json.Marshal(resp)
+}
+
+func convertReasoningToAnthropic(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["reasoning_effort"]
+	if !ok {
+		return
+	}
+	defer delete(reqMap, "reasoning_effort")
+
+	effort := openAIReasoningToAnthropicEffort(rawString(raw))
+	if effort == "" {
+		return
+	}
+	outputConfig := outputConfigMap(reqMap)
+	outputConfig["effort"], _ = json.Marshal(effort)
+	setOutputConfig(reqMap, outputConfig)
+}
+
+func convertThinkingToOpenAI(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["thinking"]
+	if !ok {
+		return
+	}
+	defer delete(reqMap, "thinking")
+
+	if _, exists := reqMap["reasoning_effort"]; exists {
+		return
+	}
+	var thinking map[string]json.RawMessage
+	if json.Unmarshal(raw, &thinking) != nil {
+		return
+	}
+	switch rawString(thinking["type"]) {
+	case "adaptive", "enabled":
+		reqMap["reasoning_effort"] = json.RawMessage(`"high"`)
+	case "disabled":
+		reqMap["reasoning_effort"] = json.RawMessage(`"none"`)
+	}
+}
+
+func convertParallelToolCallsToAnthropic(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["parallel_tool_calls"]
+	if !ok {
+		return
+	}
+	defer delete(reqMap, "parallel_tool_calls")
+
+	var enabled bool
+	if json.Unmarshal(raw, &enabled) != nil || enabled {
+		return
+	}
+	toolChoice := map[string]json.RawMessage{
+		"type": json.RawMessage(`"auto"`),
+	}
+	if rawChoice, ok := reqMap["tool_choice"]; ok {
+		var existing map[string]json.RawMessage
+		if json.Unmarshal(rawChoice, &existing) == nil && len(existing) > 0 {
+			toolChoice = existing
+		}
+	}
+	toolChoice["disable_parallel_tool_use"] = json.RawMessage(`true`)
+	reqMap["tool_choice"], _ = json.Marshal(toolChoice)
+}
+
+func openAIReasoningToAnthropicEffort(reasoning string) string {
+	switch reasoning {
+	case "none", "minimal", "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high":
+		return "high"
+	case "xhigh":
+		return "max"
+	default:
+		return ""
+	}
+}
+
+func anthropicEffortToOpenAIReasoning(effort string) string {
+	switch effort {
+	case "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high":
+		return "high"
+	case "max":
+		return "xhigh"
+	default:
+		return ""
+	}
+}
+
+func convertPromptCacheToAnthropic(reqMap map[string]json.RawMessage) {
+	if raw, ok := reqMap["prompt_cache_retention"]; ok {
+		cacheControl := map[string]json.RawMessage{
+			"type": json.RawMessage(`"ephemeral"`),
+		}
+		if rawString(raw) == "24h" {
+			cacheControl["ttl"] = json.RawMessage(`"1h"`)
+		}
+		reqMap["cache_control"], _ = json.Marshal(cacheControl)
+		delete(reqMap, "prompt_cache_retention")
+	}
+	delete(reqMap, "prompt_cache_key")
+}
+
+func convertWebSearchOptionsToAnthropic(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["web_search_options"]
+	if !ok {
+		return
+	}
+	defer delete(reqMap, "web_search_options")
+
+	var opts map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &opts)
+	tool := map[string]json.RawMessage{
+		"type": json.RawMessage(`"web_search_20250305"`),
+		"name": json.RawMessage(`"web_search"`),
+	}
+	if userLocation := anthropicUserLocationFromOpenAI(opts["user_location"]); len(userLocation) > 0 {
+		tool["user_location"] = userLocation
+	}
+	appendTool(reqMap, tool)
+}
+
+func mergeOpenAIWebSearchOptionsFromAnthropicTool(reqMap map[string]json.RawMessage, tool map[string]json.RawMessage) {
+	opts := map[string]json.RawMessage{}
+	if raw, ok := reqMap["web_search_options"]; ok {
+		_ = json.Unmarshal(raw, &opts)
+	}
+	if loc := openAIUserLocationFromAnthropic(tool["user_location"]); len(loc) > 0 {
+		opts["user_location"] = loc
+	}
+	if len(opts) == 0 {
+		opts["search_context_size"] = json.RawMessage(`"medium"`)
+	}
+	reqMap["web_search_options"], _ = json.Marshal(opts)
+}
+
+func anthropicUserLocationFromOpenAI(raw json.RawMessage) json.RawMessage {
+	var wrapper map[string]json.RawMessage
+	if json.Unmarshal(raw, &wrapper) == nil {
+		if approx := wrapper["approximate"]; len(approx) > 0 {
+			var loc map[string]json.RawMessage
+			if json.Unmarshal(approx, &loc) == nil {
+				loc["type"] = json.RawMessage(`"approximate"`)
+				out, _ := json.Marshal(loc)
+				return out
+			}
+		}
+	}
+	return nil
+}
+
+func openAIUserLocationFromAnthropic(raw json.RawMessage) json.RawMessage {
+	var loc map[string]json.RawMessage
+	if json.Unmarshal(raw, &loc) != nil || len(loc) == 0 {
+		return nil
+	}
+	delete(loc, "type")
+	out, _ := json.Marshal(map[string]map[string]json.RawMessage{"approximate": loc})
+	return out
+}
+
+func appendTool(reqMap map[string]json.RawMessage, tool map[string]json.RawMessage) {
+	var tools []map[string]json.RawMessage
+	if raw, ok := reqMap["tools"]; ok {
+		_ = json.Unmarshal(raw, &tools)
+	}
+	name := rawString(tool["name"])
+	toolType := rawString(tool["type"])
+	for _, existing := range tools {
+		if rawString(existing["name"]) == name && rawString(existing["type"]) == toolType {
+			return
+		}
+	}
+	tools = append(tools, tool)
+	reqMap["tools"], _ = json.Marshal(tools)
+}
+
+func parseOpenAIAllowedTools(raw json.RawMessage) (string, map[string]bool) {
+	var allowed struct {
+		Mode  string `json:"mode"`
+		Tools []struct {
+			Type     string `json:"type"`
+			Function *struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if json.Unmarshal(raw, &allowed) != nil {
+		return "", nil
+	}
+	names := map[string]bool{}
+	for _, tool := range allowed.Tools {
+		if tool.Function != nil && tool.Function.Name != "" {
+			names[tool.Function.Name] = true
+		}
+	}
+	return allowed.Mode, names
+}
+
+func filterToolsByName(reqMap map[string]json.RawMessage, names map[string]bool) {
+	if len(names) == 0 {
+		return
+	}
+	var tools []map[string]json.RawMessage
+	if json.Unmarshal(reqMap["tools"], &tools) != nil {
+		return
+	}
+	filtered := make([]map[string]json.RawMessage, 0, len(tools))
+	for _, tool := range tools {
+		name := rawString(tool["name"])
+		if name == "" {
+			var fn map[string]json.RawMessage
+			if json.Unmarshal(tool["function"], &fn) == nil {
+				name = rawString(fn["name"])
+			}
+		}
+		if names[name] {
+			filtered = append(filtered, tool)
+		}
+	}
+	reqMap["tools"], _ = json.Marshal(filtered)
+}
+
+func outputConfigMap(reqMap map[string]json.RawMessage) map[string]json.RawMessage {
+	outputConfig := map[string]json.RawMessage{}
+	if raw, ok := reqMap["output_config"]; ok {
+		_ = json.Unmarshal(raw, &outputConfig)
+	}
+	return outputConfig
+}
+
+func setOutputConfig(reqMap map[string]json.RawMessage, outputConfig map[string]json.RawMessage) {
+	if len(outputConfig) == 0 {
+		delete(reqMap, "output_config")
+		return
+	}
+	reqMap["output_config"], _ = json.Marshal(outputConfig)
+}
+
+func normalizeServiceTierForAnthropic(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["service_tier"]
+	if !ok {
+		return
+	}
+	switch rawString(raw) {
+	case "auto", "priority":
+		reqMap["service_tier"] = json.RawMessage(`"auto"`)
+	case "default", "standard", "standard_only", "scale", "flex":
+		reqMap["service_tier"] = json.RawMessage(`"standard_only"`)
+	default:
+		delete(reqMap, "service_tier")
+	}
+}
+
+func normalizeServiceTierForOpenAI(reqMap map[string]json.RawMessage) {
+	raw, ok := reqMap["service_tier"]
+	if !ok {
+		return
+	}
+	switch rawString(raw) {
+	case "standard_only", "standard":
+		reqMap["service_tier"] = json.RawMessage(`"default"`)
+	case "auto", "default", "flex", "scale", "priority":
+	default:
+		delete(reqMap, "service_tier")
+	}
 }
 
 func preserveCompletionTokenLimit(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
@@ -2280,7 +2727,7 @@ func convertMessagesForUpstream(reqMap map[string]json.RawMessage, isSourceAnthr
 		json.Unmarshal(msg["role"], &role)
 		switch {
 		case isTargetAnthropic:
-			if normalizeOpenAIContentForAnthropic(msg) {
+			if normalizeOpenAIContentForAnthropic(msg, isSourceAnthropic) {
 				modified = true
 			}
 			if role == "developer" {
@@ -2403,7 +2850,7 @@ func contentBlocksFromRaw(raw json.RawMessage) []map[string]json.RawMessage {
 	return blocks
 }
 
-func normalizeOpenAIContentForAnthropic(msg map[string]json.RawMessage) bool {
+func normalizeOpenAIContentForAnthropic(msg map[string]json.RawMessage, isSourceAnthropic bool) bool {
 	raw := msg["content"]
 	blocks := contentBlocksFromRaw(raw)
 	if len(blocks) == 0 {
@@ -2421,14 +2868,26 @@ func normalizeOpenAIContentForAnthropic(msg map[string]json.RawMessage) bool {
 				converted = append(converted, imageBlock)
 				modified = true
 			} else {
-				converted = append(converted, block)
+				modified = true
 			}
-		default:
+		case "input_audio", "audio":
+			modified = true
+		case "text", "image", "document", "tool_use", "tool_result", "thinking", "redacted_thinking", "server_tool_use", "web_search_tool_result", "code_execution_tool_result", "mcp_tool_use", "mcp_tool_result":
 			converted = append(converted, block)
+		default:
+			if isSourceAnthropic {
+				converted = append(converted, block)
+			} else {
+				modified = true
+			}
 		}
 	}
 	if modified {
-		msg["content"], _ = json.Marshal(converted)
+		if len(converted) == 0 {
+			msg["content"] = json.RawMessage(`""`)
+		} else {
+			msg["content"], _ = json.Marshal(converted)
+		}
 	}
 	return modified
 }
@@ -2492,7 +2951,6 @@ func convertAnthropicMessageForOpenAI(msg map[string]json.RawMessage) ([]map[str
 	var contentParts []map[string]json.RawMessage
 	var toolCalls []map[string]json.RawMessage
 	var toolMessages []map[string]json.RawMessage
-	modified := false
 
 	for _, block := range blocks {
 		var blockType string
@@ -2511,42 +2969,45 @@ func convertAnthropicMessageForOpenAI(msg map[string]json.RawMessage) ([]map[str
 		case "image":
 			if part, ok := anthropicImageBlockToOpenAI(block); ok {
 				contentParts = append(contentParts, part)
-				modified = true
 			}
 		case "tool_use":
 			if role == "assistant" {
 				if call, ok := anthropicToolUseToOpenAI(block); ok {
 					toolCalls = append(toolCalls, call)
-					modified = true
 				}
 			}
 		case "tool_result":
 			if toolMsg, ok := anthropicToolResultToOpenAI(block); ok {
 				toolMessages = append(toolMessages, toolMsg)
-				modified = true
 			}
-		case "thinking", "redacted_thinking":
-			modified = true
-		default:
-			modified = true
 		}
 	}
 
-	if len(toolMessages) > 0 {
-		return toolMessages, true
+	buildTextMessage := func() map[string]json.RawMessage {
+		if len(contentParts) > 0 && len(contentParts) != len(textParts) {
+			msg["content"], _ = json.Marshal(contentParts)
+		} else {
+			msg["content"], _ = json.Marshal(strings.Join(textParts, ""))
+		}
+		delete(msg, "tool_calls")
+		if len(toolCalls) > 0 {
+			msg["tool_calls"], _ = json.Marshal(toolCalls)
+		}
+		return msg
 	}
 
-	if len(contentParts) > 0 && len(contentParts) != len(textParts) {
-		msg["content"], _ = json.Marshal(contentParts)
-		modified = true
-	} else {
-		msg["content"], _ = json.Marshal(strings.Join(textParts, ""))
-		modified = true
+	if len(toolMessages) > 0 {
+		out := make([]map[string]json.RawMessage, 0, len(toolMessages)+1)
+		out = append(out, toolMessages...)
+		if len(textParts) > 0 || len(contentParts) > 0 {
+			textMsg := buildTextMessage()
+			textMsg["role"] = json.RawMessage(`"user"`)
+			out = append(out, textMsg)
+		}
+		return out, true
 	}
-	if len(toolCalls) > 0 {
-		msg["tool_calls"], _ = json.Marshal(toolCalls)
-	}
-	return []map[string]json.RawMessage{msg}, modified
+
+	return []map[string]json.RawMessage{buildTextMessage()}, true
 }
 
 func anthropicImageBlockToOpenAI(block map[string]json.RawMessage) (map[string]json.RawMessage, bool) {
@@ -2702,7 +3163,8 @@ var openAIFields = map[string]bool{
 	"logprobs": true, "top_logprobs": true, "reasoning_effort": true,
 	"functions": true, "function_call": true, "store": true, "metadata": true,
 	"service_tier": true, "modalities": true, "audio": true, "prediction": true,
-	"web_search_options": true,
+	"web_search_options": true, "prompt_cache_key": true, "prompt_cache_retention": true,
+	"safety_identifier": true, "verbosity": true,
 }
 
 // anthropicFields are fields accepted by the Anthropic messages API.
@@ -2712,7 +3174,8 @@ var anthropicFields = map[string]bool{
 	"stop_sequences": true, "system": true, "tools": true,
 	"tool_choice": true, "thinking": true, "metadata": true,
 	"container": true, "context_management": true, "mcp_servers": true,
-	"service_tier": true,
+	"service_tier": true, "output_config": true, "cache_control": true,
+	"inference_geo": true,
 }
 
 // sanitizeForProvider removes fields that the target provider doesn't support.
@@ -2726,6 +3189,67 @@ func sanitizeForProvider(reqMap map[string]json.RawMessage, provider string) {
 			delete(reqMap, k)
 		}
 	}
+}
+
+func normalizeProviderParameterValues(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
+	normalizeFloatRange(reqMap, "top_p", 0, 1)
+	if isTargetAnthropic {
+		normalizeFloatRange(reqMap, "temperature", 0, 1)
+		normalizePositiveInt(reqMap, "top_k")
+		normalizeServiceTierForAnthropic(reqMap)
+		return
+	}
+
+	normalizeFloatRange(reqMap, "temperature", 0, 2)
+	normalizePositiveInt(reqMap, "n")
+	normalizeServiceTierForOpenAI(reqMap)
+	normalizeEnum(reqMap, "reasoning_effort", map[string]bool{
+		"none": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true,
+	})
+	normalizeEnum(reqMap, "verbosity", map[string]bool{
+		"low": true, "medium": true, "high": true,
+	})
+}
+
+func normalizeFloatRange(reqMap map[string]json.RawMessage, field string, min, max float64) {
+	raw, ok := reqMap[field]
+	if !ok {
+		return
+	}
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || value < min {
+		delete(reqMap, field)
+		return
+	}
+	if value > max {
+		reqMap[field], _ = json.Marshal(max)
+	}
+}
+
+func normalizePositiveInt(reqMap map[string]json.RawMessage, field string) {
+	raw, ok := reqMap[field]
+	if !ok {
+		return
+	}
+	if !positiveIntRaw(raw) {
+		delete(reqMap, field)
+	}
+}
+
+func normalizeEnum(reqMap map[string]json.RawMessage, field string, allowed map[string]bool) {
+	raw, ok := reqMap[field]
+	if !ok {
+		return
+	}
+	value := rawString(raw)
+	if !allowed[value] {
+		delete(reqMap, field)
+	}
+}
+
+func positiveIntRaw(raw json.RawMessage) bool {
+	var value int
+	return json.Unmarshal(raw, &value) == nil && value > 0
 }
 
 // sanitizeThinkingForProtocol intentionally keeps Anthropic thinking untouched.
@@ -2894,29 +3418,19 @@ func convertSystemForUpstream(reqMap map[string]json.RawMessage, isSourceAnthrop
 
 // ensureMaxTokens validates and fixes max_tokens for the target provider.
 func ensureMaxTokens(reqMap map[string]json.RawMessage, isTargetAnthropic bool) {
-	if raw, ok := reqMap["max_tokens"]; ok {
-		var mt int
-		if json.Unmarshal(raw, &mt) == nil && mt <= 0 {
-			delete(reqMap, "max_tokens")
-		}
-	}
+	normalizePositiveInt(reqMap, "max_tokens")
+	normalizePositiveInt(reqMap, "max_completion_tokens")
 	// max_completion_tokens → max_tokens for non-OpenAI providers
-	if !isTargetAnthropic {
-		if raw, ok := reqMap["max_completion_tokens"]; ok {
-			if _, hasMT := reqMap["max_tokens"]; !hasMT {
-				var mt int
-				if json.Unmarshal(raw, &mt) == nil && mt > 0 {
-					reqMap["max_tokens"] = raw
-				}
-			}
-			delete(reqMap, "max_completion_tokens")
-		}
-	}
-	// Anthropic requires max_tokens > 0
+	// Anthropic requires max_tokens > 0.
 	if isTargetAnthropic {
 		if _, ok := reqMap["max_tokens"]; !ok {
-			reqMap["max_tokens"], _ = json.Marshal(4096)
+			if raw, hasCompletionTokens := reqMap["max_completion_tokens"]; hasCompletionTokens {
+				reqMap["max_tokens"] = raw
+			} else {
+				reqMap["max_tokens"], _ = json.Marshal(4096)
+			}
 		}
+		delete(reqMap, "max_completion_tokens")
 	}
 }
 
